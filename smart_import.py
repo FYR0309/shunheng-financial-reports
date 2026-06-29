@@ -45,11 +45,12 @@ def classify_file(filepath):
             # Or look for keywords in goods names
             sales_kw = 0
             cost_kw = 0
+            # Search ALL string cells in first data rows for keywords (robust to column shifts)
             for row in ws.iter_rows(min_row=2, max_row=min(10, ws.max_row), values_only=True):
-                goods = str(row[11]) if len(row) > 11 and row[11] else ''
-                if any(kw in goods for kw in ['回收', '销售', '废铁', '废铜', '废铝', '废钢']):
+                row_text = ' '.join([str(c) for c in row if c and isinstance(c, str)])
+                if any(kw in row_text for kw in ['回收', '销售', '废铁', '废铜', '废铝', '废钢']):
                     sales_kw += 1
-                if any(kw in goods for kw in ['采购', '配件', '运费', '维修', '办公', '耗材', '修理', '油']):
+                if any(kw in row_text for kw in ['采购', '配件', '运费', '维修', '办公', '耗材', '修理', '油料']):
                     cost_kw += 1
 
             if sales_kw > cost_kw:
@@ -137,6 +138,13 @@ def parse_opening_balance(filepath):
     if data_start is None:
         data_start = 3  # Default: data starts from row 4
 
+    # Helper: safe float with comma stripping
+    def _to_float(v):
+        if v is None: return None
+        if isinstance(v, (int, float)): return float(v)
+        try: return float(str(v).replace(',', '').replace('，', '').strip())
+        except: return None
+
     # Scan for asset items (left side, cols 0-3)
     # and liability items (right side, cols 4-7 if available)
     has_right_side = len(all_rows[0]) >= 7 if all_rows else False
@@ -147,18 +155,17 @@ def parse_opening_balance(filepath):
         left_end = None
         # Find the ending balance column (usually col 2 or 3)
         for ci in [2, 3]:
-            if len(row) > ci and row[ci] is not None:
-                try:
-                    left_end = float(row[ci])
+            if len(row) > ci:
+                left_end = _to_float(row[ci])
+                if left_end is not None:
                     break
-                except (TypeError, ValueError):
-                    continue
 
         if left_name and left_end is not None and left_name not in ['', 'None']:
-            # Skip section headers
-            if not any(kw in left_name for kw in ['资产', '负债', '所有者权益', '流动', '非流动', '合计', '：']):
-                result[left_name] = left_end
-            elif '合计' in left_name:
+            # Skip section headers but keep data items
+            # Only skip pure section headers like "资产", "流动资产：", etc.
+            is_section = (left_name in ['资产', '负债', '负债和所有者权益', '所有者权益']
+                          or left_name.endswith('：') or left_name.endswith(':'))
+            if not is_section:
                 result[left_name] = left_end
 
         # Right side: liability/equity items
@@ -166,17 +173,15 @@ def parse_opening_balance(filepath):
             right_name = str(row[4]).strip() if row[4] else ''
             right_end = None
             for ci in [6, 7]:
-                if len(row) > ci and row[ci] is not None:
-                    try:
-                        right_end = float(row[ci])
+                if len(row) > ci:
+                    right_end = _to_float(row[ci])
+                    if right_end is not None:
                         break
-                    except (TypeError, ValueError):
-                        continue
 
             if right_name and right_end is not None and right_name not in ['', 'None']:
-                if not any(kw in right_name for kw in ['资产', '负债', '所有者权益', '流动', '非流动', '合计', '：']):
-                    result[right_name] = right_end
-                elif '合计' in right_name:
+                is_section_r = (right_name in ['资产', '负债', '负债和所有者权益', '所有者权益']
+                                or right_name.endswith('：') or right_name.endswith(':'))
+                if not is_section_r:
                     result[right_name] = right_end
 
     wb.close()
