@@ -230,6 +230,41 @@ elif st.session_state.page == '公司档案':
             st.subheader('年初资产负债表余额')
             st.caption('填写去年12月31日的资产负债表期末数。填一次即可。')
 
+            # Smart import: upload balance sheet xlsx
+            with st.expander('📤 上传去年资产负债表自动填写', expanded=not opening):
+                bs_file = st.file_uploader('上传资产负债表 (.xlsx)', type=['xlsx'],
+                    key='bs_upload', help='上传去年12月的资产负债表，系统自动识别科目并填入')
+                if bs_file:
+                    import tempfile
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+                    tmp.write(bs_file.read()); tmp.close()
+                    try:
+                        from smart_import import parse_opening_balance, match_bs_to_config
+                        bs_items, errs = parse_opening_balance(tmp.name)
+                        if bs_items:
+                            wanted = ['货币资金','应收账款','预付账款','其他应收款','存货',
+                                      '流动资产合计','固定资产原价','减：累计折旧','固定资产账面价值',
+                                      '长期待摊费用','非流动资产合计','资产总计',
+                                      '短期借款','应付账款','预收账款','应付职工薪酬','应交税费',
+                                      '其他应付款','流动负债合计','负债合计',
+                                      '实收资本（或股本）','未分配利润','所有者权益（或股东权益）合计',
+                                      '负债和所有者权益（或股东权益）总计']
+                            matched, unmatched = match_bs_to_config(bs_items, wanted)
+                            if matched:
+                                for field, val in matched.items():
+                                    opening[field] = val
+                                st.success(f'✅ 已自动填入 {len(matched)} 项')
+                                if unmatched:
+                                    st.caption(f'未识别: {len(unmatched)} 项 ({", ".join(n for n,v in unmatched[:5])}...)')
+                            else:
+                                st.warning('未能匹配任何科目，请检查文件是否为标准资产负债表格式')
+                        else:
+                            st.warning('未能解析出科目数据，请手动填写')
+                    except Exception as e:
+                        st.error(f'解析失败: {e}')
+                    finally:
+                        os.unlink(tmp.name)
+
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown('**资产**')
@@ -363,8 +398,88 @@ elif st.session_state.page == '数据导入':
         month = st.session_state.current_month
 
         st.subheader(f'导入 {year}年{month}月 数据')
-        st.caption('上传以下文件。支持 .xls 和 .xlsx 格式。')
 
+        # Smart batch import
+        with st.expander('🧠 智能批量导入（一键上传，自动识别）', expanded=True):
+            st.caption('一次性选择所有文件（可多选），系统自动识别文件类型并归类。')
+            batch_files = st.file_uploader(
+                '选择所有本月文件', type=['xlsx', 'xls'],
+                accept_multiple_files=True, key='batch_import',
+                help='可同时选择 发票×2 + 银行流水×2 + 工资表，一起上传'
+            )
+            if batch_files:
+                import io
+                from smart_import import classify_file
+                classified = {'sales': None, 'costs': None, 'nong': None, 'xin': None, 'payroll': None}
+                classified_bytes = {}
+                unknown = []
+                for f in batch_files:
+                    import tempfile
+                    fbytes = f.read()
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+                    tmp.write(fbytes); tmp_path = tmp.name; tmp.close()
+                    ftype = classify_file(tmp_path)
+                    fname = f.name
+                    os.unlink(tmp_path)
+
+                    icon_map = {'sales_invoice': '📄', 'cost_invoice': '📄', 'bank_nong': '🏦',
+                                'bank_xin': '🏦', 'payroll': '👤', 'unknown': '❓'}
+                    label_map = {'sales_invoice': '销售收入', 'cost_invoice': '成本费用',
+                                 'bank_nong': '农行流水', 'bank_xin': '信用社流水',
+                                 'payroll': '工资表', 'unknown': '未识别'}
+
+                    if ftype == 'sales_invoice':
+                        classified['sales'] = f; classified_bytes['sales'] = fbytes
+                    elif ftype == 'cost_invoice':
+                        classified['costs'] = f; classified_bytes['costs'] = fbytes
+                    elif ftype == 'bank_nong':
+                        classified['nong'] = f; classified_bytes['nong'] = fbytes
+                    elif ftype == 'bank_xin':
+                        classified['xin'] = f; classified_bytes['xin'] = fbytes
+                    elif ftype == 'payroll':
+                        classified['payroll'] = f; classified_bytes['payroll'] = fbytes
+                    else:
+                        unknown.append(fname)
+
+                # Show classification results
+                c1, c2, c3 = st.columns(3)
+                for ci, (slot, file_obj) in enumerate([(c1, 'sales'), (c2, 'costs'), (c3, 'payroll')]):
+                    idx = ci
+                    col = [c1, c2, c3][idx]
+                    with col:
+                        f = classified[slot]
+                        if f:
+                            st.success(f'{icon_map.get(slot+"_invoice" if slot in ("sales","costs") else "bank_"+slot if slot in ("nong","xin") else slot, "")} {label_map.get(slot+"_invoice" if slot in ("sales","costs") else "bank_"+slot if slot in ("nong","xin") else slot, slot)}: {f.name}')
+                        else:
+                            st.info(f'⏳ {label_map.get(slot+"_invoice" if slot in ("sales","costs") else "bank_"+slot if slot in ("nong","xin") else slot, slot)}: 等待上传')
+
+                with st.expander('🏦 银行流水详情', expanded=False):
+                    bc1, bc2 = st.columns(2)
+                    with bc1:
+                        f = classified['nong']
+                        if f: st.success(f'🏦 农行: {f.name}')
+                        else: st.info('⏳ 农行: 等待上传')
+                    with bc2:
+                        f = classified['xin']
+                        if f: st.success(f'🏦 信用社: {f.name}')
+                        else: st.info('⏳ 信用社: 等待上传')
+
+                if unknown:
+                    st.warning(f'⚠ 未识别 {len(unknown)} 个文件: {", ".join(unknown)}')
+                    st.caption('请检查文件格式，或手动上传到下方对应位置。')
+
+                # Auto-fill individual uploaders with bytes
+                st.session_state['_batch_sales'] = classified.get('sales')
+                st.session_state['_batch_costs'] = classified.get('costs')
+                st.session_state['_batch_nong'] = classified.get('nong')
+                st.session_state['_batch_xin'] = classified.get('xin')
+                st.session_state['_batch_payroll'] = classified.get('payroll')
+                st.session_state['_batch_bytes'] = classified_bytes
+                if any(v for v in classified.values()):
+                    st.success(f'✅ 识别完成：{sum(1 for v in classified.values() if v)} 个文件已归类')
+
+        st.divider()
+        st.caption('也可以逐个手动上传：')
         col1, col2 = st.columns(2)
         with col1:
             sales_file = st.file_uploader('📄 销售收入发票', type=['xlsx', 'xls'], key='sales')
@@ -374,6 +489,13 @@ elif st.session_state.page == '数据导入':
             bank_xin = st.file_uploader('🏦 信用社流水 (.xls/.xlsx)', type=['xls','xlsx'], key='xin')
             payroll_file = st.file_uploader('👤 工资薪金表', type=['xlsx', 'xls'], key='payroll')
 
+        # Merge batch-classified files with manual uploads
+        if st.session_state.get('_batch_sales'): sales_file = st.session_state['_batch_sales']
+        if st.session_state.get('_batch_costs'): costs_file = st.session_state['_batch_costs']
+        if st.session_state.get('_batch_nong'): bank_nong = st.session_state['_batch_nong']
+        if st.session_state.get('_batch_xin'): bank_xin = st.session_state['_batch_xin']
+        if st.session_state.get('_batch_payroll'): payroll_file = st.session_state['_batch_payroll']
+
         if st.button('保存文件并进入核验 →', type='primary'):
             if not any([sales_file, costs_file, bank_nong, bank_xin, payroll_file]):
                 st.error('请至少上传一个文件')
@@ -382,15 +504,17 @@ elif st.session_state.page == '数据导入':
                 upload_dir = os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
                 os.makedirs(upload_dir, exist_ok=True)
 
+                batch_bytes = st.session_state.get('_batch_bytes', {})
                 for label, file_obj in [
                     ('sales', sales_file), ('costs', costs_file),
                     ('nong', bank_nong), ('xin', bank_xin), ('payroll', payroll_file)
                 ]:
                     if file_obj:
-                        ext = file_obj.name.split('.')[-1]
+                        ext = file_obj.name.split('.')[-1] if hasattr(file_obj, 'name') else 'xlsx'
                         fname = f'{label}.{ext}'
+                        content = batch_bytes.get(label) if label in batch_bytes else file_obj.read()
                         with open(os.path.join(upload_dir, fname), 'wb') as f:
-                            f.write(file_obj.read())
+                            f.write(content if isinstance(content, bytes) else content)
                         saved.append(fname)
 
                 st.success(f'已保存 {len(saved)} 个文件：{", ".join(saved)}')
