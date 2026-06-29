@@ -1,0 +1,14 @@
+# Temp files
+~$*
+*.tmp
+__pycache__/
+
+# Intermediate data
+_calc_data.json
+
+# Raw source data (large files)
+顺恒2026年1-5月销售收入数据.xlsx
+顺恒2026年1-5月成本费用数据.xlsx
+顺恒2026年*月农行明细.xls
+顺恒2026年*月农村信用社明细.xls
+顺恒2026年*月工资薪金.xlsx
