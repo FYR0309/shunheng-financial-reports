@@ -368,21 +368,40 @@ def compute_profit_statement(all_income, all_expense, payroll_summary):
         "admin_salary": 0.0, "admin_depreciation": 0.0,
         "admin_rent": 0.0, "admin_other": 0.0,
         "financial_expense": 0.0, "vat_collected": 0.0, "vat_paid_input": 0.0,
+        "income_tax": 0.0,
     } for m in MONTHS}
 
     for _, amount, tax, total, item, counterparty, month in all_income:
         monthly[month]["revenue"] += amount
         monthly[month]["vat_collected"] += tax
 
+    # 成本费用分类关键词
+    COGS_KEYWORDS = ["废", "铁", "钢", "铝", "铜", "纸", "塑料", "原料", "材料",
+                      "运输", "物流", "装卸", "搬运", "过磅"]
+    ADMIN_KEYWORDS = ["办公", "文具", "耗材", "水电", "物业", "通讯", "电话",
+                       "差旅", "招待", "餐", "住宿", "维修", "配件", "检测",
+                       "咨询", "服务", "加油", "汽油", "柴油", "保险", "软件",
+                       "打印", "印", "快递", "邮", "广告", "刻章", "法律"]
+    RENT_KEYWORDS = ["租赁", "租金", "房租", "租"]
+
     for _, amount, tax, total, item, counterparty, month in all_expense:
         item_str = str(item) if item else ""
-        if any(kw in item_str for kw in ["租赁", "租金", "房租"]):
+        if any(kw in item_str for kw in RENT_KEYWORDS):
             monthly[month]["admin_rent"] += amount
+        elif any(kw in item_str for kw in ADMIN_KEYWORDS):
+            monthly[month]["admin_other"] += amount
+        elif any(kw in item_str for kw in COGS_KEYWORDS):
+            monthly[month]["cogs"] += amount
         else:
+            # 默认归入COGS（未匹配到的采购类支出）
             monthly[month]["cogs"] += amount
         monthly[month]["vat_paid_input"] += tax
 
+    # 工资按月平均分摊
+    total_salary = payroll_summary.get("total_gross", 0) + payroll_summary.get("total_social_unit", 0)
+    monthly_salary = total_salary / len(MONTHS)
     for m in MONTHS:
+        monthly[m]["admin_salary"] = monthly_salary
         monthly[m]["admin_depreciation"] = MONTHLY_DEPRECIATION
 
     for m in MONTHS:
@@ -394,8 +413,8 @@ def compute_profit_statement(all_income, all_expense, payroll_summary):
         "cogs": sum(monthly[m]["cogs"] for m in MONTHS),
         "gross_profit": 0.0,
         "tax_surcharge": sum(monthly[m]["tax_surcharge"] for m in MONTHS),
-        "admin_salary": 0.0,
-        "admin_depreciation": MONTHLY_DEPRECIATION * 5,
+        "admin_salary": sum(monthly[m]["admin_salary"] for m in MONTHS),
+        "admin_depreciation": sum(monthly[m]["admin_depreciation"] for m in MONTHS),
         "admin_rent": sum(monthly[m]["admin_rent"] for m in MONTHS),
         "admin_other": sum(monthly[m]["admin_other"] for m in MONTHS),
         "total_admin": 0.0,
@@ -408,7 +427,6 @@ def compute_profit_statement(all_income, all_expense, payroll_summary):
         "vat_paid_input": sum(monthly[m]["vat_paid_input"] for m in MONTHS),
     }
 
-    cumulative["admin_salary"] = payroll_summary.get("total_gross", 0) + payroll_summary.get("total_social_unit", 0)
     cumulative["gross_profit"] = cumulative["revenue"] - cumulative["cogs"]
     cumulative["total_admin"] = (cumulative["admin_salary"] + cumulative["admin_depreciation"]
                                   + cumulative["admin_rent"] + cumulative["admin_other"])
@@ -426,6 +444,11 @@ def compute_profit_statement(all_income, all_expense, payroll_summary):
             cumulative["income_tax"] = cumulative["total_profit"] * 0.10
 
     cumulative["net_profit"] = cumulative["total_profit"] - cumulative["income_tax"]
+
+    # 月度所得税分摊（按累计所得税/月数平均）
+    monthly_tax = cumulative["income_tax"] / len(MONTHS)
+    for m in MONTHS:
+        monthly[m]["income_tax"] = monthly_tax
 
     notes = [
         f"营业收入(累计): {cumulative['revenue']:,.2f}",
@@ -456,7 +479,6 @@ def compute_balance_sheet(opening_bs, cumulative_pl, bank_end_balance, payroll_5
     bs["其他应收款"] = (get_open("其他应收款"), get_open("其他应收款"))
 
     inventory_open = get_open("存货")
-    total_purchase_tax = sum(amount + tax for _, amount, tax, _, _, _, _ in [])  # placeholder, filled in main
     bs["存货"] = (inventory_open, inventory_open)
 
     current_end = (bs["货币资金"][0] + bs["应收账款"][0] + bs["预付账款"][0]
@@ -532,8 +554,11 @@ def compute_cashflow(all_transactions, payroll_5m_summary):
     }
 
     unclassified = []
-    tax_keywords = ["税务", "税局", "国家税务", "国库", "税款"]
-    bank_fee_keywords = ["手续费", "账户管理费", "服务费", "短信费"]
+    tax_keywords = ["税务", "税局", "国家税务", "国库", "税款", "征税", "纳税"]
+    bank_fee_keywords = ["手续费", "账户管理费", "服务费", "短信费", "年费", "工本费"]
+    salary_keywords = ["工资", "薪酬", "薪金", "代发", "劳务", "奖金", "补贴"]
+    # 工资相关：银行代发标识
+    salary_bank_keywords = ["农信银e支付", "e支付", "代发工资", "批量代发"]
 
     for txn in all_transactions:
         _, income, expense, balance, other_name, other_account, summary, month = txn
@@ -548,11 +573,11 @@ def compute_cashflow(all_transactions, payroll_5m_summary):
                 cf["销售商品提供劳务收到的现金"] += income
 
         if expense > 0:
-            if any(kw in summary for kw in bank_fee_keywords) or (expense < 100 and any(kw in other_name for kw in ["银行", "农行", "信用"])):
+            if any(kw in summary for kw in bank_fee_keywords) or any(kw in other_name for kw in bank_fee_keywords) or (expense < 100 and any(kw in other_name for kw in ["银行", "农行", "信用"])):
                 cf["支付其他与经营活动有关的现金"] += expense
-            elif any(kw in other_name for kw in tax_keywords):
+            elif any(kw in other_name for kw in tax_keywords) or any(kw in summary for kw in tax_keywords):
                 cf["支付的各项税费"] += expense
-            elif "工资" in summary or "薪酬" in summary or "薪金" in summary:
+            elif any(kw in summary for kw in salary_keywords) or any(kw in other_name for kw in salary_keywords) or any(kw in summary for kw in salary_bank_keywords):
                 cf["支付给职工以及为职工支付的现金"] += expense
             else:
                 cf["购买商品接受劳务支付的现金"] += expense
@@ -562,6 +587,20 @@ def compute_cashflow(all_transactions, payroll_5m_summary):
                               + cf["支付给职工以及为职工支付的现金"]
                               + cf["支付的各项税费"]
                               + cf["支付其他与经营活动有关的现金"])
+
+    # 保底：如果关键词未匹配到工资支出，用薪酬数据估算
+    total_net_pay = payroll_5m_summary.get("total_net", 0)
+    if cf["支付给职工以及为职工支付的现金"] < total_net_pay * 0.1 and total_net_pay > 0:
+        # 从"购买商品接受劳务支付的现金"中划转
+        transferred = min(total_net_pay, cf["购买商品接受劳务支付的现金"])
+        cf["购买商品接受劳务支付的现金"] -= transferred
+        cf["支付给职工以及为职工支付的现金"] += transferred
+        cf["经营活动现金流出小计"] = (cf["购买商品接受劳务支付的现金"]
+                                  + cf["支付给职工以及为职工支付的现金"]
+                                  + cf["支付的各项税费"]
+                                  + cf["支付其他与经营活动有关的现金"])
+        unclassified.append(f"[ADJ] 工资支出自动估算: 从购买商品划转 {transferred:,.2f} 元到支付给职工")
+
     cf["经营活动产生的现金流量净额"] = cf["经营活动现金流入小计"] - cf["经营活动现金流出小计"]
 
     monthly_io = {m: [0.0, 0.0] for m in MONTHS}
@@ -646,7 +685,7 @@ def apply_style(cell, font=BODY_FONT, border=THIN_BORDER, number_format=None):
         cell.number_format = number_format
 
 
-def write_profit_sheet(wb, cumulative):
+def write_profit_sheet(wb, cumulative, monthly_detail):
     ws = wb.create_sheet("利润表")
     ws.sheet_properties.tabColor = "4472C4"
 
@@ -654,7 +693,7 @@ def write_profit_sheet(wb, cumulative):
     ws["A1"] = f"{COMPANY_NAME} 利润表"
     ws["A1"].font = TITLE_FONT
     ws.merge_cells("A2:E2")
-    ws["A2"] = "2026年1-5月（小企业会计准则）           单位：元"
+    ws["A2"] = "2026年1-5月（小企业会计准则）      会小企02表      单位：元"
     ws["A2"].font = Font(name="微软雅黑", size=9)
 
     headers = ["项目", "行次", "本月数", "本年累计", "附注"]
@@ -662,32 +701,62 @@ def write_profit_sheet(wb, cumulative):
         c = ws.cell(row=4, column=col, value=h)
         apply_style(c, HEADER_FONT)
 
+    # 取5月当月数据
+    may = monthly_detail.get(5, {})
+    may_revenue = may.get("revenue", 0)
+    may_cogs = may.get("cogs", 0)
+    may_tax_surcharge = may.get("tax_surcharge", 0)
+    may_admin_salary = may.get("admin_salary", 0)
+    may_admin_depreciation = may.get("admin_depreciation", 0)
+    may_admin_rent = may.get("admin_rent", 0)
+    may_admin_other = may.get("admin_other", 0)
+    may_financial = may.get("financial_expense", 0)
+    may_total_admin = may_admin_salary + may_admin_depreciation + may_admin_rent + may_admin_other
+    may_gross_profit = may_revenue - may_cogs
+    may_operating = may_gross_profit - may_tax_surcharge - may_total_admin - may_financial
+    may_total_profit = may_operating  # 无营业外收支
+    may_income_tax = may.get("income_tax", 0)
+    may_net = may_total_profit - may_income_tax
+
+    # (项目名, 行次, 本月数, 累计数, 是否粗体)
     items = [
-        ("一、营业收入", 1, cumulative["revenue"], True),
-        ("减：营业成本", 2, cumulative["cogs"], False),
-        ("    税金及附加", 3, cumulative["tax_surcharge"], False),
-        ("    管理费用", 5, cumulative["total_admin"], False),
-        ("      其中：工资", 6, cumulative["admin_salary"], False),
-        ("      其中：折旧", 7, cumulative["admin_depreciation"], False),
-        ("      其中：租金", 8, cumulative["admin_rent"], False),
-        ("    财务费用", 9, cumulative["financial_expense"], False),
-        ("二、营业利润", 10, cumulative["operating_profit"], True),
-        ("加：营业外收入", 11, 0.0, False),
-        ("减：营业外支出", 12, 0.0, False),
-        ("三、利润总额", 13, cumulative["total_profit"], True),
-        ("减：所得税费用", 14, cumulative["income_tax"], False),
-        ("四、净利润", 15, cumulative["net_profit"], True),
+        ("一、营业收入", 1, may_revenue, cumulative["revenue"], True),
+        ("减：营业成本", 2, may_cogs, cumulative["cogs"], False),
+        ("    税金及附加", 3, may_tax_surcharge, cumulative["tax_surcharge"], False),
+        ("    销售费用", 4, 0, 0, False),
+        ("    管理费用", 5, may_total_admin, cumulative["total_admin"], False),
+        ("      其中：工资", 6, may_admin_salary, cumulative["admin_salary"], False),
+        ("      其中：折旧", 7, may_admin_depreciation, cumulative["admin_depreciation"], False),
+        ("      其中：租金", 8, may_admin_rent, cumulative["admin_rent"], False),
+        ("      其中：其他", 9, may_admin_other, cumulative["admin_other"], False),
+        ("    财务费用", 10, may_financial, cumulative["financial_expense"], False),
+        ("    其中：利息费用", 11, 0, 0, False),
+        ("加：投资收益", 12, 0, 0, False),
+        ("二、营业利润", 13, may_operating, cumulative["operating_profit"], True),
+        ("加：营业外收入", 14, 0, 0, False),
+        ("减：营业外支出", 15, 0, 0, False),
+        ("三、利润总额", 16, may_total_profit, cumulative["total_profit"], True),
+        ("减：所得税费用", 17, may_income_tax, cumulative["income_tax"], False),
+        ("四、净利润", 18, may_net, cumulative["net_profit"], True),
     ]
 
     row = 5
-    for name, line_num, amount, is_bold in items:
+    for name, line_num, month_amt, cum_amt, is_bold in items:
         f = BOLD_FONT if is_bold else BODY_FONT
         c1 = ws.cell(row=row, column=1, value=name); apply_style(c1, f)
         c2 = ws.cell(row=row, column=2, value=line_num); apply_style(c2, BODY_FONT)
-        c3 = ws.cell(row=row, column=3, value=""); apply_style(c3, BODY_FONT)
-        c4 = ws.cell(row=row, column=4, value=round(amount, 2)); apply_style(c4, f, number_format=NUM_FMT)
+        c3 = ws.cell(row=row, column=3, value=round(month_amt, 2)); apply_style(c3, f if is_bold else BODY_FONT, number_format=NUM_FMT)
+        c4 = ws.cell(row=row, column=4, value=round(cum_amt, 2)); apply_style(c4, f, number_format=NUM_FMT)
         c5 = ws.cell(row=row, column=5, value=""); apply_style(c5, BODY_FONT)
         row += 1
+
+    # 签章区
+    row += 2
+    ws.merge_cells(f"A{row}:C{row}"); ws.cell(row=row, column=1, value="单位负责人："); apply_style(ws.cell(row=row, column=1), BODY_FONT, THIN_BORDER)
+    ws.merge_cells(f"D{row}:E{row}"); ws.cell(row=row, column=4, value="会计负责人："); apply_style(ws.cell(row=row, column=4), BODY_FONT, THIN_BORDER)
+    row += 1
+    ws.merge_cells(f"A{row}:C{row}"); ws.cell(row=row, column=1, value="制表人："); apply_style(ws.cell(row=row, column=1), BODY_FONT, THIN_BORDER)
+    ws.merge_cells(f"D{row}:E{row}"); ws.cell(row=row, column=4, value=f"制表日期：{REPORT_END.strftime('%Y年%m月%d日')}"); apply_style(ws.cell(row=row, column=4), BODY_FONT, THIN_BORDER)
 
     for c, w in zip("ABCDE", [35, 8, 16, 20, 10]):
         ws.column_dimensions[c].width = w
@@ -701,7 +770,7 @@ def write_balance_sheet_sheet(wb, bs):
     ws["A1"] = f"{COMPANY_NAME} 资产负债表"
     ws["A1"].font = TITLE_FONT
     ws.merge_cells("A2:H2")
-    ws["A2"] = "2026年5月31日（小企业会计准则）           单位：元"
+    ws["A2"] = "2026年5月31日（小企业会计准则）     会小企01表      单位：元"
     ws["A2"].font = Font(name="微软雅黑", size=9)
 
     col_headers = ["资产", "行次", "期末数", "年初数", "负债及所有者权益", "行次", "期末数", "年初数"]
@@ -709,59 +778,121 @@ def write_balance_sheet_sheet(wb, bs):
         c = ws.cell(row=4, column=col, value=h)
         apply_style(c, HEADER_FONT)
 
+    # 完整标准行次（小企业会计准则会小企01表），零余额项目亦列出
     left = [
         ("货币资金", 1, "货币资金"),
+        ("短期投资", 2, "短期投资"),
+        ("应收票据", 3, "应收票据"),
         ("应收账款", 4, "应收账款"),
         ("预付账款", 5, "预付账款"),
+        ("应收股利", 6, "应收股利"),
+        ("应收利息", 7, "应收利息"),
         ("其他应收款", 8, "其他应收款"),
         ("存货", 9, "存货"),
+        ("　其中：原材料", 10, "原材料"),
+        ("　其中：在产品", 11, "在产品"),
+        ("　其中：库存商品", 12, "库存商品"),
+        ("　其中：周转材料", 13, "周转材料"),
+        ("其他流动资产", 14, "其他流动资产"),
         ("流动资产合计", 15, "流动资产合计"),
-        ("固定资产原值", 18, "固定资产原值"),
+        ("长期债券投资", 16, "长期债券投资"),
+        ("长期股权投资", 17, "长期股权投资"),
+        ("固定资产原价", 18, "固定资产原值"),
         ("减：累计折旧", 19, "累计折旧"),
         ("固定资产账面价值", 20, "固定资产账面价值"),
+        ("在建工程", 21, "在建工程"),
+        ("工程物资", 22, "工程物资"),
+        ("固定资产清理", 23, "固定资产清理"),
+        ("生产性生物资产", 24, "生产性生物资产"),
+        ("无形资产", 25, "无形资产"),
+        ("开发支出", 26, "开发支出"),
         ("长期待摊费用", 27, "长期待摊费用"),
+        ("其他非流动资产", 28, "其他非流动资产"),
         ("非流动资产合计", 29, "非流动资产合计"),
         ("资产总计", 30, "资产总计"),
     ]
     right = [
+        ("短期借款", 31, "短期借款"),
+        ("应付票据", 32, "应付票据"),
         ("应付账款", 33, "应付账款"),
         ("预收账款", 34, "预收账款"),
         ("应付职工薪酬", 35, "应付职工薪酬"),
         ("应交税费", 36, "应交税费"),
+        ("应付利息", 37, "应付利息"),
+        ("应付利润", 38, "应付利润"),
         ("其他应付款", 39, "其他应付款"),
+        ("其他流动负债", 40, "其他流动负债"),
         ("流动负债合计", 41, "流动负债合计"),
+        ("长期借款", 42, "长期借款"),
+        ("长期应付款", 43, "长期应付款"),
+        ("递延收益", 44, "递延收益"),
+        ("其他非流动负债", 45, "其他非流动负债"),
+        ("非流动负债合计", 46, "非流动负债合计"),
         ("负债合计", 47, "负债合计"),
-        ("实收资本", 48, "实收资本"),
+        ("实收资本（或股本）", 48, "实收资本"),
+        ("资本公积", 49, "资本公积"),
         ("盈余公积", 50, "盈余公积"),
         ("未分配利润", 51, "未分配利润"),
         ("所有者权益合计", 52, "所有者权益合计"),
         ("负债和所有者权益总计", 53, "负债和所有者权益总计"),
     ]
 
+    # 零余额科目映射
+    ZERO_KEYS = {"短期投资", "应收票据", "应收股利", "应收利息",
+                 "原材料", "在产品", "库存商品", "周转材料", "其他流动资产",
+                 "长期债券投资", "长期股权投资", "在建工程", "工程物资",
+                 "固定资产清理", "生产性生物资产", "无形资产", "开发支出",
+                 "其他非流动资产",
+                 "短期借款", "应付票据", "应付利息", "应付利润",
+                 "其他流动负债", "长期借款", "长期应付款", "递延收益",
+                 "其他非流动负债", "非流动负债合计", "资本公积"}
+
     row = 5
     for i in range(max(len(left), len(right))):
+        # 先对整行套基础样式 + 边框
+        for c in range(1, 9):
+            apply_style(ws.cell(row=row, column=c), BODY_FONT)
+
         if i < len(left):
             name, ln, key = left[i]
             ev, bv = bs.get(key, (0.0, 0.0))
+            if key in ZERO_KEYS:
+                ev, bv = 0.0, 0.0
             dot = "合计" in name or "总计" in name
-            f = BOLD_FONT if dot else BODY_FONT
-            ws.cell(row=row, column=1, value=name); apply_style(ws.cell(row=row, column=1), f)
-            ws.cell(row=row, column=2, value=ln); apply_style(ws.cell(row=row, column=2), BODY_FONT)
-            ws.cell(row=row, column=3, value=round(ev, 2)); apply_style(ws.cell(row=row, column=3), f, number_format=NUM_FMT)
-            ws.cell(row=row, column=4, value=round(bv, 2)); apply_style(ws.cell(row=row, column=4), f, number_format=NUM_FMT)
+            ws.cell(row=row, column=1, value=name)
+            ws.cell(row=row, column=2, value=ln)
+            ws.cell(row=row, column=3, value=round(ev, 2))
+            ws.cell(row=row, column=4, value=round(bv, 2))
+            ws.cell(row=row, column=3).number_format = NUM_FMT
+            ws.cell(row=row, column=4).number_format = NUM_FMT
+            if dot:
+                for c in range(1, 5):
+                    ws.cell(row=row, column=c).font = BOLD_FONT
+
         if i < len(right):
             name, ln, key = right[i]
             ev, bv = bs.get(key, (0.0, 0.0))
+            if key in ZERO_KEYS:
+                ev, bv = 0.0, 0.0
             dot = "合计" in name or "总计" in name
-            f = BOLD_FONT if dot else BODY_FONT
-            ws.cell(row=row, column=5, value=name); apply_style(ws.cell(row=row, column=5), f)
-            ws.cell(row=row, column=6, value=ln); apply_style(ws.cell(row=row, column=6), BODY_FONT)
-            ws.cell(row=row, column=7, value=round(ev, 2)); apply_style(ws.cell(row=row, column=7), f, number_format=NUM_FMT)
-            ws.cell(row=row, column=8, value=round(bv, 2)); apply_style(ws.cell(row=row, column=8), f, number_format=NUM_FMT)
-        # Apply borders to all 8 cells
-        for c in range(1, 9):
-            apply_style(ws.cell(row=row, column=c), BODY_FONT)
+            ws.cell(row=row, column=5, value=name)
+            ws.cell(row=row, column=6, value=ln)
+            ws.cell(row=row, column=7, value=round(ev, 2))
+            ws.cell(row=row, column=8, value=round(bv, 2))
+            ws.cell(row=row, column=7).number_format = NUM_FMT
+            ws.cell(row=row, column=8).number_format = NUM_FMT
+            if dot:
+                for c in range(5, 9):
+                    ws.cell(row=row, column=c).font = BOLD_FONT
         row += 1
+
+    # 签章区
+    row += 2
+    ws.merge_cells(f"A{row}:D{row}"); ws.cell(row=row, column=1, value="单位负责人："); apply_style(ws.cell(row=row, column=1), BODY_FONT, THIN_BORDER)
+    ws.merge_cells(f"E{row}:H{row}"); ws.cell(row=row, column=5, value="会计负责人："); apply_style(ws.cell(row=row, column=5), BODY_FONT, THIN_BORDER)
+    row += 1
+    ws.merge_cells(f"A{row}:D{row}"); ws.cell(row=row, column=1, value="制表人："); apply_style(ws.cell(row=row, column=1), BODY_FONT, THIN_BORDER)
+    ws.merge_cells(f"E{row}:H{row}"); ws.cell(row=row, column=5, value=f"制表日期：{REPORT_END.strftime('%Y年%m月%d日')}"); apply_style(ws.cell(row=row, column=5), BODY_FONT, THIN_BORDER)
 
     for c, w in zip("ABCDEFGH", [28, 6, 16, 16, 28, 6, 16, 16]):
         ws.column_dimensions[c].width = w
@@ -775,7 +906,7 @@ def write_cashflow_sheet(wb, cf):
     ws["A1"] = f"{COMPANY_NAME} 现金流量表"
     ws["A1"].font = TITLE_FONT
     ws.merge_cells("A2:D2")
-    ws["A2"] = "2026年1-5月（小企业会计准则）           单位：元"
+    ws["A2"] = "2026年1-5月（小企业会计准则）     会小企03表      单位：元"
     ws["A2"].font = Font(name="微软雅黑", size=9)
 
     for col, h in enumerate(["项目", "行次", "本期金额", "附注"], 1):
@@ -784,6 +915,7 @@ def write_cashflow_sheet(wb, cf):
 
     cats = cf["categories"]
     items = [
+        # 一、经营活动产生的现金流量
         ("一、经营活动产生的现金流量", "", "", True),
         ("销售商品、提供劳务收到的现金", 1, cats["销售商品提供劳务收到的现金"], False),
         ("收到其他与经营活动有关的现金", 2, cats["收到其他与经营活动有关的现金"], False),
@@ -794,6 +926,30 @@ def write_cashflow_sheet(wb, cf):
         ("支付其他与经营活动有关的现金", 7, cats["支付其他与经营活动有关的现金"], False),
         ("经营活动现金流出小计", 8, cats["经营活动现金流出小计"], True),
         ("经营活动产生的现金流量净额", 9, cats["经营活动产生的现金流量净额"], True),
+        # 二、投资活动产生的现金流量
+        ("二、投资活动产生的现金流量", "", "", True),
+        ("收回短期投资、长期债券投资和长期股权投资收到的现金", 10, 0, False),
+        ("取得投资收益收到的现金", 11, 0, False),
+        ("处置固定资产、无形资产和其他非流动资产收回的现金净额", 12, 0, False),
+        ("投资活动现金流入小计", 13, 0, True),
+        ("购建固定资产、无形资产和其他非流动资产支付的现金", 14, 0, False),
+        ("投资活动现金流出小计", 15, 0, True),
+        ("投资活动产生的现金流量净额", 16, 0, True),
+        # 三、筹资活动产生的现金流量
+        ("三、筹资活动产生的现金流量", "", "", True),
+        ("取得借款收到的现金", 17, 0, False),
+        ("吸收投资者投资收到的现金", 18, 0, False),
+        ("收到其他与筹资活动有关的现金", 19, 0, False),
+        ("筹资活动现金流入小计", 20, 0, True),
+        ("偿还借款本金支付的现金", 21, 0, False),
+        ("偿还借款利息支付的现金", 22, 0, False),
+        ("分配利润支付的现金", 23, 0, False),
+        ("筹资活动现金流出小计", 24, 0, True),
+        ("筹资活动产生的现金流量净额", 25, 0, True),
+        # 四、现金净增加额
+        ("四、现金净增加额", "", "", True),
+        ("加：期初现金及现金等价物余额", 26, 0, False),
+        ("期末现金及现金等价物余额", 27, 0, False),
     ]
 
     row = 5
@@ -802,11 +958,23 @@ def write_cashflow_sheet(wb, cf):
         c1 = ws.cell(row=row, column=1, value=name); apply_style(c1, f)
         if line_num != "":
             c2 = ws.cell(row=row, column=2, value=line_num); apply_style(c2, BODY_FONT)
+        else:
+            c2 = ws.cell(row=row, column=2, value=""); apply_style(c2, BODY_FONT)
         if amount != "":
             c3 = ws.cell(row=row, column=3, value=round(amount, 2) if isinstance(amount, (int, float)) else amount)
             apply_style(c3, f if is_bold else BODY_FONT, number_format=NUM_FMT)
+        else:
+            c3 = ws.cell(row=row, column=3, value=""); apply_style(c3, BODY_FONT)
         c4 = ws.cell(row=row, column=4, value=""); apply_style(c4, BODY_FONT)
         row += 1
+
+    # 签章区
+    row += 2
+    ws.merge_cells(f"A{row}:B{row}"); ws.cell(row=row, column=1, value="单位负责人："); apply_style(ws.cell(row=row, column=1), BODY_FONT, THIN_BORDER)
+    ws.merge_cells(f"C{row}:D{row}"); ws.cell(row=row, column=3, value="会计负责人："); apply_style(ws.cell(row=row, column=3), BODY_FONT, THIN_BORDER)
+    row += 1
+    ws.merge_cells(f"A{row}:B{row}"); ws.cell(row=row, column=1, value="制表人："); apply_style(ws.cell(row=row, column=1), BODY_FONT, THIN_BORDER)
+    ws.merge_cells(f"C{row}:D{row}"); ws.cell(row=row, column=3, value=f"制表日期：{REPORT_END.strftime('%Y年%m月%d日')}"); apply_style(ws.cell(row=row, column=3), BODY_FONT, THIN_BORDER)
 
     for c, w in zip("ABCD", [42, 8, 20, 10]):
         ws.column_dimensions[c].width = w
@@ -999,23 +1167,8 @@ def main():
                 all_errors.append(f"银行流水文件不存在: {bf}")
 
     # 用最后一个月每条流水的余额累加（不同银行）
-    bank_end_balance = sum(bank_last_balances.values())
-    print(f"   银行流水: {bank_txn_count} 条")
-
-    # 用5月末最后一笔余额
-    # 重新计算：从所有交易中找每个银行5月最后一笔
-    abc_last_balance = None
-    rcc_last_balance = None
-    for txn in sorted(all_transactions, key=lambda t: t[0], reverse=True):
-        _, _, _, bal, other_name, _, _, month = txn
-        if month == 5 and "农行" in other_name and abc_last_balance is None:
-            abc_last_balance = bal
-        if month == 5 and "信用社" in other_name and rcc_last_balance is None:
-            rcc_last_balance = bal
-
-    # 用最后一笔余额总和
-    # 更简单的方法：从两个列表里取各自5月最后一笔
     bank_end_balance = sum(bank_last_balances.values()) if bank_last_balances else 0.0
+    print(f"   银行流水: {bank_txn_count} 条")
     print(f"   银行期末余额(各户5月末): {bank_end_balance:,.2f}")
     for k, v in bank_last_balances.items():
         print(f"     {k}: {v:,.2f}")
@@ -1088,13 +1241,21 @@ def main():
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-    write_profit_sheet(wb, cumulative_pl)
+    write_profit_sheet(wb, cumulative_pl, monthly_pl)
     write_balance_sheet_sheet(wb, bs)
     write_cashflow_sheet(wb, cf_result)
 
     xlsx_path = os.path.join(OUTPUT_DIR, "顺恒2026年1-5月财务报表.xlsx")
-    wb.save(xlsx_path)
-    print(f"   [PASS] Excel: {xlsx_path}")
+    try:
+        wb.save(xlsx_path)
+        print(f"   [PASS] Excel: {xlsx_path}")
+    except PermissionError:
+        print(f"   [FAIL] 无法保存 Excel: 文件被占用，请关闭 Excel 后重试")
+        print(f"   文件路径: {xlsx_path}")
+        return 1
+    except Exception as e:
+        print(f"   [FAIL] 保存 Excel 失败: {e}")
+        return 1
 
     invoice_data = {"income_count": len(all_income), "expense_count": len(all_expense)}
     bank_data = {"txn_count": bank_txn_count}
