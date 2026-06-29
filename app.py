@@ -370,8 +370,8 @@ elif st.session_state.page == '数据导入':
             sales_file = st.file_uploader('📄 销售收入发票', type=['xlsx', 'xls'], key='sales')
             costs_file = st.file_uploader('📄 成本费用发票', type=['xlsx', 'xls'], key='costs')
         with col2:
-            bank_nong = st.file_uploader('🏦 农行流水 (.xls)', type=['xls'], key='nong')
-            bank_xin = st.file_uploader('🏦 信用社流水 (.xls)', type=['xls'], key='xin')
+            bank_nong = st.file_uploader('🏦 农行流水 (.xls/.xlsx)', type=['xls','xlsx'], key='nong')
+            bank_xin = st.file_uploader('🏦 信用社流水 (.xls/.xlsx)', type=['xls','xlsx'], key='xin')
             payroll_file = st.file_uploader('👤 工资薪金表', type=['xlsx', 'xls'], key='payroll')
 
         if st.button('保存文件并进入核验 →', type='primary'):
@@ -449,6 +449,8 @@ elif st.session_state.page == '数据核验':
             nong_result = None
             with c1:
                 nong_path = os.path.join(upload_dir, 'nong.xls')
+                if not os.path.exists(nong_path):
+                    nong_path = os.path.join(upload_dir, 'nong.xlsx')
                 if os.path.exists(nong_path):
                     be = BankExtractor(nong_path, BankExtractor.BANK_NONGHANG)
                     nong_result = be.extract()
@@ -457,6 +459,8 @@ elif st.session_state.page == '数据核验':
                     st.metric('农行余额', f'¥{nong_result["end_balance"]:,.2f}')
             with c2:
                 xin_path = os.path.join(upload_dir, 'xin.xls')
+                if not os.path.exists(xin_path):
+                    xin_path = os.path.join(upload_dir, 'xin.xlsx')
                 if os.path.exists(xin_path):
                     be = BankExtractor(xin_path, BankExtractor.BANK_XINYONGSHE)
                     xin_result = be.extract()
@@ -584,8 +588,14 @@ elif st.session_state.page == '报表生成':
             results['sales'], _ = ie.extract()
             ie2 = InvoiceExtractor(os.path.join(gen_upload_dir, 'costs.xlsx'))
             results['costs'], _ = ie2.extract()
-            be1 = BankExtractor(os.path.join(gen_upload_dir, 'nong.xls'), 'nonghang')
-            be2 = BankExtractor(os.path.join(gen_upload_dir, 'xinyong.xls'), 'xinyongshe')
+            nong_f = os.path.join(gen_upload_dir, 'nong.xls')
+            if not os.path.exists(nong_f):
+                nong_f = os.path.join(gen_upload_dir, 'nong.xlsx')
+            be1 = BankExtractor(nong_f, 'nonghang')
+            xin_f = os.path.join(gen_upload_dir, 'xin.xls')
+            if not os.path.exists(xin_f):
+                xin_f = os.path.join(gen_upload_dir, 'xin.xlsx')
+            be2 = BankExtractor(xin_f, 'xinyongshe')
             bank_data = {'农行': be1.extract(), '信用社': be2.extract()}
             bank_end = sum(b['end_balance'] for b in bank_data.values())
             pe = PayrollExtractor(os.path.join(gen_upload_dir, 'payroll.xlsx'))
@@ -712,7 +722,11 @@ elif st.session_state.page == '报表生成':
                 dpath = os.path.join(uploads_base, dname)
                 if not os.path.isdir(dpath):
                     continue
-                required = ['sales.xlsx', 'costs.xlsx', 'nong.xls', 'xinyong.xls', 'payroll.xlsx']
+                required = ['sales.xlsx', 'costs.xlsx', 'payroll.xlsx']
+                has_nong = os.path.exists(os.path.join(dpath, 'nong.xls')) or os.path.exists(os.path.join(dpath, 'nong.xlsx'))
+                has_xin = os.path.exists(os.path.join(dpath, 'xin.xls')) or os.path.exists(os.path.join(dpath, 'xin.xlsx'))
+                if not (has_nong and has_xin):
+                    continue
                 if not [f for f in required if not os.path.exists(os.path.join(dpath, f))]:
                     available_months.append(dname)
 

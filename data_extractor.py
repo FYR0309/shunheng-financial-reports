@@ -8,6 +8,7 @@ Three extractors:
 
 All extractors are file-path-in, dict-out. No global state. No accounting logic.
 """
+import os
 import openpyxl
 import xlrd
 from datetime import datetime
@@ -156,37 +157,52 @@ class BankExtractor:
         self.filepath = filepath
         self.bank_type = bank_type
 
-    def extract(self):
-        """Read the bank statement and return standardized dict."""
+    def _read_sheet(self):
+        """Read the bank file as a list-of-lists, supporting both .xls and .xlsx.
+        Tries openpyxl first (handles both xlsx and misnamed xls-as-xlsx),
+        falls back to xlrd for legacy .xls files."""
+        # Try openpyxl first — handles .xlsx and .xls files that are actually xlsx format
+        try:
+            wb = openpyxl.load_workbook(self.filepath, data_only=True)
+            ws = wb.active
+            return [[cell.value for cell in row] for row in ws.iter_rows()]
+        except Exception:
+            pass
+        # Fall back to xlrd for legacy .xls files
         wb = xlrd.open_workbook(self.filepath)
         ws = wb.sheet_by_index(0)
+        return [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(ws.nrows)]
+
+    def extract(self):
+        """Read the bank statement and return standardized dict."""
+        rows = self._read_sheet()
 
         if self.bank_type == self.BANK_NONGHANG:
-            return self._extract_nonghang(ws)
+            return self._extract_nonghang(rows)
         elif self.bank_type == self.BANK_XINYONGSHE:
-            return self._extract_xinyongshe(ws)
+            return self._extract_xinyongshe(rows)
         else:
             raise ValueError(f"Unknown bank_type: {self.bank_type}")
 
-    def _extract_nonghang(self, ws):
+    def _extract_nonghang(self, rows):
         in_total, out_total = 0.0, 0.0
         end_balance = 0.0
         transactions = []
 
-        for r in range(3, ws.nrows):
-            if not _is_date_xl(ws.cell_value(r, 0)):
+        for r in range(3, len(rows)):
+            if not _is_date_xl(rows[r][0]):
                 continue
-            amt_in = _sf(ws.cell_value(r, 1))
-            amt_out = _sf(ws.cell_value(r, 2))
-            bal = _sf(ws.cell_value(r, 3))
-            summary = str(ws.cell_value(r, 7)) if ws.ncols > 7 else ''
+            amt_in = _sf(rows[r][1])
+            amt_out = _sf(rows[r][2])
+            bal = _sf(rows[r][3])
+            summary = str(rows[r][7]) if len(rows[r]) > 7 else ''
 
             in_total += amt_in
             out_total += amt_out
             end_balance = bal
 
             transactions.append({
-                'date': ws.cell_value(r, 0),
+                'date': rows[r][0],
                 'amount_in': amt_in,
                 'amount_out': amt_out,
                 'balance': bal,
@@ -201,17 +217,17 @@ class BankExtractor:
             'bank_type': self.bank_type,
         }
 
-    def _extract_xinyongshe(self, ws):
+    def _extract_xinyongshe(self, rows):
         in_total, out_total = 0.0, 0.0
         first_balance = None
         transactions = []
 
-        for r in range(4, ws.nrows):
-            if not _is_date_xl(ws.cell_value(r, 0)):
+        for r in range(4, len(rows)):
+            if not _is_date_xl(rows[r][0]):
                 continue
-            amt_out = _sf(ws.cell_value(r, 1))  # Note: reversed columns
-            amt_in = _sf(ws.cell_value(r, 2))
-            bal = _sf(ws.cell_value(r, 3))
+            amt_out = _sf(rows[r][1])  # Note: reversed columns
+            amt_in = _sf(rows[r][2])
+            bal = _sf(rows[r][3])
 
             if first_balance is None:
                 first_balance = bal
@@ -220,7 +236,7 @@ class BankExtractor:
             out_total += amt_out
 
             transactions.append({
-                'date': ws.cell_value(r, 0),
+                'date': rows[r][0],
                 'amount_in': amt_in,
                 'amount_out': amt_out,
                 'balance': bal,
