@@ -19,3 +19,12 @@ _calc_data.json
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 运行时数据（用户文件，敏感信息，不上传）
+data/companies/
+data/uploads/
+data/output/
+data/logs/
+
+# 模板配置文件保留（非敏感，程序需要）
+!templates/
