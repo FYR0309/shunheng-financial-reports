@@ -51,7 +51,7 @@ DEFAULTS = {
 }
 for key, val in DEFAULTS.items():
     if key not in st.session_state:
-        st.session_state[key] = key if key == 'page' else val
+        st.session_state[key] = val
 
 # ---- Helpers ----
 def get_company_list():
