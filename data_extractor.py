@@ -63,13 +63,14 @@ class InvoiceExtractor:
     """
 
     def __init__(self, filepath, sheet_name='信息汇总表',
-                 col_date=8, col_code=9, col_amount=16, col_tax=18):
+                 col_date=8, col_code=9, col_amount=16, col_tax=18, col_goods=11):
         self.filepath = filepath
         self.sheet_name = sheet_name
         self.col_date = col_date
         self.col_code = col_code
         self.col_amount = col_amount
         self.col_tax = col_tax
+        self.col_goods = col_goods
 
     def extract(self):
         """Read the file and return ({month_int: [records]}, skipped_count)."""
@@ -105,6 +106,7 @@ class InvoiceExtractor:
                 'account_code': code,
                 'amount': amount,
                 'tax_amount': tax,
+                'goods_name': str(row[self.col_goods]) if self.col_goods is not None and self.col_goods < len(row) and row[self.col_goods] else '',
             })
 
         wb.close()
