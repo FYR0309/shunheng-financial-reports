@@ -1,0 +1,16 @@
+# 源数据文件 — 敏感信息，不上传
+*.xls
+*.xlsx
+!docs/
+!*.md
+
+# Python
+__pycache__/
+*.pyc
+
+# 输出目录里的报表数据
+报表输出/
+
+# 系统文件
+.DS_Store
+Thumbs.db
