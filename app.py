@@ -1302,155 +1302,83 @@ elif st.session_state.page == '使用教程':
     TUTORIAL_DIR = os.path.join(BASE_DIR, 'tutorial')
     has_images = os.path.isdir(TUTORIAL_DIR)
 
+    def _tut(path):
+        return os.path.join(TUTORIAL_DIR, path) if has_images and os.path.exists(os.path.join(TUTORIAL_DIR, path)) else None
+
     # ---- Step 1 ----
     with st.expander('🚀 启动工具 & 首页介绍', expanded=True):
+        pic = _tut('01-home.png')
+        if pic: st.image(pic, use_container_width=True)
         st.markdown("""
         **启动方式：** 双击 `启动报表工具.bat` 或在终端运行 `streamlit run app.py`
+        → 浏览器打开 **http://localhost:8501**
 
-        浏览器打开 **http://localhost:8501** 进入首页。
-
-        界面说明：
-        - **左侧边栏**：公司选择、年月选择、8个功能页面导航
-        - **主页**：快捷操作入口
+        看图识别：**①** 导航栏切换功能 **②** 选择公司和年月 **③** 主工作区
         """)
-        if has_images:
-            img_path = os.path.join(TUTORIAL_DIR, '01-home.png')
-            if os.path.exists(img_path):
-                st.image(img_path, use_container_width=True)
 
     # ---- Step 2 ----
     with st.expander('📝 第一步：创建公司'):
+        pic = _tut('02-company.png')
+        if pic: st.image(pic, use_container_width=True)
         st.markdown("""
-        点击左侧导航 **「公司档案」**，填写：
-        1. **简短名称**：用于文件命名，如 `顺恒废旧公司`
-        2. **公司全称**：用于报表抬头，如 `来宾市顺恒废旧汽车回收有限公司`
-
-        点击 **「创建新公司」** 按钮。
+        看图操作：**①** 填公司简称 **②** 填公司全称（用于报表抬头）**③** 点创建按钮
         """)
-        if has_images:
-            for img in ['02-company-empty.png', '02c-company-created.png']:
-                p = os.path.join(TUTORIAL_DIR, img)
-                if os.path.exists(p):
-                    st.image(p, use_container_width=True)
 
     # ---- Step 3 ----
     with st.expander('📋 第二步：填写年初余额'):
+        pic = _tut('03-opening.png')
+        if pic: st.image(pic, use_container_width=True)
         st.markdown("""
-        创建公司后，页面下方出现 **「年初余额」** 表单。
-
-        > 💡 打开去年12月的资产负债表，将"期末余额"填入对应输入框。
-
-        必填科目：货币资金、应收账款、存货、固定资产原价、资产总计、
-        应付账款、其他应付款、实收资本、未分配利润。
-
-        填完后点击 **「💾 保存年初余额」**。
+        看图操作：**①** 直接上传去年12月资产负债表xlsx，系统自动识别填入（新功能！）
+        **②** 资产类科目 **③** 负债及权益类 **④** 保存
         """)
-        if has_images:
-            p = os.path.join(TUTORIAL_DIR, '03-opening-balance.png')
-            if os.path.exists(p):
-                st.image(p, use_container_width=True)
 
     # ---- Step 4 ----
     with st.expander('🔗 第三步：配置科目映射'):
+        if has_images:
+            for i in ['04-mapping.png', '04b-mapping-pl.png']:
+                p = _tut(i)
+                if p: st.image(p, use_container_width=True)
         st.markdown("""
-        点击左侧 **「科目映射」**。这一步告诉系统「发票上的科目编码对应报表里哪一行」。
-
-        操作：
-        1. 选择报表类型标签（利润表 / 资产负债表 / 现金流量表）
-        2. 上传一张历史成本发票，系统自动列出所有科目编码
-        3. 在下拉框中为每个编码选择对应的报表行
-
+        告诉系统「发票上的科目编码对应报表里哪一行」。
+        上传一张历史发票 → 系统列出所有科目编码 → 下拉选择映射。
         > 💡 只需首次配置一次，之后每月自动复用。
         """)
-        if has_images:
-            for img in ['04-mapping.png', '04b-mapping-pl.png']:
-                p = os.path.join(TUTORIAL_DIR, img)
-                if os.path.exists(p):
-                    st.image(p, use_container_width=True)
 
     # ---- Step 5 ----
     with st.expander('📥 第四步：导入当月数据'):
+        pic = _tut('04-import.png')
+        if pic: st.image(pic, use_container_width=True)
         st.markdown("""
-        点击左侧 **「数据导入」**，每月上传 5 个文件：
-
-        | 序号 | 文件 | 格式 | 说明 |
-        |------|------|------|------|
-        | 1 | 销售收入发票 | .xlsx | 金蝶导出的「信息汇总表」 |
-        | 2 | 成本费用发票 | .xlsx | 同上 |
-        | 3 | 农行银行流水 | .xls | 农行导出的标准格式 |
-        | 4 | 信用社银行流水 | .xls | 信用社导出的标准格式 |
-        | 5 | 当月工资表 | .xlsx | 含「合计」行的工资表 |
-
-        上传后点击 **「导入数据」**。
+        看图操作：**①** 一键批量导入（多选所有文件，系统自动识别归类）
+        **②** 也可逐个手动上传 **③** 保存并核验
         """)
-        if has_images:
-            for img in ['05-import.png', '05b-imported.png']:
-                p = os.path.join(TUTORIAL_DIR, img)
-                if os.path.exists(p):
-                    st.image(p, use_container_width=True)
 
     # ---- Step 6 ----
     with st.expander('🔍 第五步：数据核验'):
+        pic = _tut('05-verify.png')
+        if pic: st.image(pic, use_container_width=True)
         st.markdown("""
-        导入后自动跳转到 **「数据核验」** 页面，展示：
-        - 📊 数据摘要（发票张数、收入/成本总额）
-        - 🏦 银行数据（收支合计、期末余额）
-        - 👥 工资数据（应发合计）
-
-        结果颜色说明：
-        - ✅ 绿色 = 核验通过
-        - ⚠ 黄色 = 轻微警告
-        - 🔴 红色 = 严重问题
-
-        确认无误后点击 **「确认无误，生成报表 →」**。
+        看图操作：**①** 检查数据摘要（发票张数、收入/成本/银行/工资总额）
+        **②** 确认无误 → 进入报表生成
         """)
-        if has_images:
-            p = os.path.join(TUTORIAL_DIR, '06-verify.png')
-            if os.path.exists(p):
-                st.image(p, use_container_width=True)
 
     # ---- Step 7 ----
     with st.expander('📊 第六步：生成三大报表'):
+        pic = _tut('06-generate.png')
+        if pic: st.image(pic, use_container_width=True)
         st.markdown("""
-        进入 **「报表生成」** 页面，点击 **「🚀 生成三大报表」**。
-
-        系统自动完成：
-        1. 利润表计算（营业收入 → 净利润）
-        2. 资产负债表计算（A = L + E 自动平衡）
-        3. 现金流量表计算（直接法 + 间接法）
-        4. 格式渲染并保存
-
-        > 🎯 同时进行自动校验：资产负债表平衡检查、银行余额核对等。
-
-        ### 批量生成
-        如果有多个月份的数据，页面上方出现 **「⚡ 批量生成」** 区域，多选月份后一键生成。
+        看图操作：**①** 多月份可按需批量生成 **②** 点击生成三大报表
+        系统自动：利润表 → 资产负债表 → 现金流量表 → 格式渲染 → 保存
         """)
-        if has_images:
-            for img in ['07-generate.png', '07b-generated.png']:
-                p = os.path.join(TUTORIAL_DIR, img)
-                if os.path.exists(p):
-                    st.image(p, use_container_width=True)
 
     # ---- Step 8 ----
     with st.expander('📝 第七步：分析导出 & 历史对比'):
-        st.markdown("""
-        ### 分析导出
-        进入 **「分析导出」** 页面：
-        - 📥 下载三大报表（利润表/资产负债表/现金流量表 .xlsx）
-        - 📄 生成分析报告（Word格式，含7大板块自动分析）
-
-        ### 历史对比
-        进入 **「历史对比」** 页面：
-        - 多选月份进行横排对比
-        - 自动计算变动额和变动率
-        - 异常波动预警（>30% ⚠ / >50% 🔴）
-        - 支持导出对比 Excel 文件
-        """)
-        if has_images:
-            for img in ['08-export.png', '09-history.png']:
-                p = os.path.join(TUTORIAL_DIR, img)
-                if os.path.exists(p):
-                    st.image(p, use_container_width=True)
+        pic1 = _tut('07-export.png'); pic2 = _tut('08-history.png')
+        if pic1: st.image(pic1, use_container_width=True)
+        st.markdown("**①** 下载三大报表 **②** 生成Word分析报告")
+        if pic2: st.image(pic2, use_container_width=True)
+        st.markdown("**①** 多选对比月份 **②** 横排对比表，自动标注异常波动（>30%⚠/ >50%🔴）")
 
     # ---- Summary ----
     st.divider()
