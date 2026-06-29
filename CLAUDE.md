@@ -28,7 +28,7 @@
 
 - [x] 现金流量表（间接法）完整生成 `calc_engine.calculate_cf()` ✅ 2026-06-29
 - [x] Word 分析报告 `generate_analysis_docx.py` 集成到 app.py ✅ 2026-06-29
-- [ ] 自定义模板上传解析 `template_engine.parse_custom_template()`
+- [x] 自定义模板上传解析 `template_engine.parse_custom_template()` ✅ 2026-06-29
 - [ ] 审计日志 `data/logs/`
 - [ ] 多月份批量生成
 

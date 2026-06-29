@@ -117,6 +117,12 @@ from data_extractor import InvoiceExtractor, BankExtractor, PayrollExtractor
 from calc_engine import CalcEngine
 from format_renderer import ReportRenderer
 from validator import validate_import, validate_extraction, validate_balance, format_validation_message
+from template_engine import (
+    parse_custom_template,
+    fill_custom_template,
+    save_custom_config,
+    load_custom_config,
+)
 import template_engine as te
 
 # ================================================================
@@ -522,6 +528,47 @@ elif st.session_state.page == '报表生成':
         company_dir = get_company_dir(company)
         upload_dir = os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
 
+        # ---- Custom Template Upload ----
+        with st.expander('📋 自定义模板（可选）', expanded=False):
+            st.caption('上传你自己的 xlsx 报表模板，系统会自动匹配数据字段并填入。')
+            c_t1, c_t2, c_t3 = st.columns(3)
+            stypes = ['pl', 'bs', 'cf']
+            stype_labels = {'pl': '利润表', 'bs': '资产负债表', 'cf': '现金流量表'}
+
+            for idx, (col, sty) in enumerate(zip([c_t1, c_t2, c_t3], stypes)):
+                with col:
+                    uploaded = st.file_uploader(
+                        f'{stype_labels[sty]}模板', type=['xlsx', 'xls'],
+                        key=f'custom_tpl_{sty}',
+                        help=f'上传自定义{stype_labels[sty]}格式'
+                    )
+                    if uploaded:
+                        tpl_dir = os.path.join(DATA_DIR, 'templates', company)
+                        os.makedirs(tpl_dir, exist_ok=True)
+                        tpl_path = os.path.join(tpl_dir, f'{sty}_custom.xlsx')
+                        with open(tpl_path, 'wb') as f:
+                            f.write(uploaded.getbuffer())
+
+                        try:
+                            parsed = parse_custom_template(tpl_path, statement_type=sty)
+                            save_custom_config(company, sty, parsed['field_map'],
+                                               uploaded.name)
+                            matched = len(parsed['field_map'])
+                            total = matched + len(parsed['unmatched'])
+                            st.success(f'✅ 已解析: {matched}/{total} 行匹配 ({stype_labels[sty]})')
+                            if parsed['unmatched']:
+                                st.caption(f'未匹配: {len(parsed["unmatched"])} 行')
+                        except Exception as e:
+                            st.error(f'解析失败: {e}')
+
+            # Show saved custom templates
+            saved = []
+            for sty in stypes:
+                if load_custom_config(company, sty):
+                    saved.append(stype_labels[sty])
+            if saved:
+                st.info(f'已保存自定义模板: {", ".join(saved)}')
+
         if st.button('🚀 生成三大报表', type='primary', use_container_width=True):
             with st.spinner('正在生成报表...'):
                 config = load_company_config(company)
@@ -600,15 +647,35 @@ elif st.session_state.page == '报表生成':
                     for w in v_warnings:
                         st.warning(format_validation_message(w))
 
-                # Render PL
+                # ---- Render helpers ----
                 period_label = f'{year}年1-{month}月'
                 bs_date = f'{year}年{month}月28日'
                 output_dir = os.path.join(OUTPUT_DIR, company)
                 os.makedirs(output_dir, exist_ok=True)
                 full_name = config.get('full_name', company)
+                tpl_base = os.path.join(DATA_DIR, 'templates', company)
 
-                pl_cfg = te.load_preset('pl')
-                pl_renderer = ReportRenderer(pl_cfg)
+                def _render_or_fill(stype, preset_map, stype_label):
+                    """Render using custom template if available, else preset."""
+                    custom_cfg = load_custom_config(company, stype)
+                    tpl_path = os.path.join(tpl_base, f'{stype}_custom.xlsx') if tpl_base else None
+                    output_path = os.path.join(output_dir,
+                        f'{company}_{year}年1-{month}月_{stype_label}.xlsx')
+
+                    if custom_cfg and tpl_path and os.path.exists(tpl_path):
+                        # Use custom template
+                        fill_custom_template(
+                            tpl_path, custom_cfg['field_map'], preset_map,
+                            output_path, company_name=full_name, period_label=period_label)
+                        return output_path
+                    else:
+                        # Use preset renderer
+                        cfg = te.load_preset(stype)
+                        renderer = ReportRenderer(cfg)
+                        renderer.render(full_name, period_label, preset_map, output_path)
+                        return output_path
+
+                # PL data map
                 pl_map = {
                     '一、营业收入': {0: pl['revenue'], 1: pl['revenue']},
                     '减：营业成本': {0: pl['cogs'], 1: pl['cogs']},
@@ -619,13 +686,10 @@ elif st.session_state.page == '报表生成':
                     '三、利润总额（亏损总额以"-"号填列）': {0: pl['total_profit'], 1: pl['total_profit']},
                     '四、净利润（净亏损以"-"号填列）': {0: pl['net_profit'], 1: pl['net_profit']},
                 }
-                pl_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_利润表.xlsx')
-                pl_renderer.render(full_name, period_label, pl_map, pl_path)
+                pl_path = _render_or_fill('pl', pl_map, '利润表')
                 st.session_state.generated_pl_path = pl_path
 
-                # Render BS
-                bs_cfg = te.load_preset('bs')
-                bs_renderer = ReportRenderer(bs_cfg)
+                # BS data map
                 bs_map = {}
                 asset_items = [('货币资金', bs.get('cash'), opening_bs.get('货币资金')),
                     ('应收账款', bs.get('ar'), opening_bs.get('应收账款')),
@@ -655,16 +719,13 @@ elif st.session_state.page == '报表生成':
                 for name, end, beg in asset_items + liab_items:
                     bs_map[name] = {0: end, 1: beg}
 
-                bs_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_资产负债表.xlsx')
-                bs_renderer.render(full_name, bs_date, bs_map, bs_path)
+                bs_path = _render_or_fill('bs', bs_map, '资产负债表')
                 st.session_state.generated_bs_path = bs_path
 
-                # Render CF (Cash Flow Statement)
+                # CF: compute then render
                 cf = calc.calculate_cf(pl, bs, {month: bank_data},
                                        {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
                                        payroll_data, fa_add, num_months)
-                cf_cfg = te.load_preset('cf')
-                cf_renderer = ReportRenderer(cf_cfg)
 
                 # Build CF data map: key = template item name, value = {0: cumulative, 1: monthly}
                 cf_items = [
@@ -722,8 +783,7 @@ elif st.session_state.page == '报表生成':
                     if val is not None:
                         cf_map[key] = {0: val, 1: round(val / num_months, 2) if num_months else None}
 
-                cf_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_现金流量表.xlsx')
-                cf_renderer.render(full_name, period_label, cf_map, cf_path)
+                cf_path = _render_or_fill('cf', cf_map, '现金流量表')
                 st.session_state.generated_cf_path = cf_path
 
                 # Save results for analysis report
