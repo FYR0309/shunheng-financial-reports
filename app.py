@@ -569,6 +569,202 @@ elif st.session_state.page == '报表生成':
             if saved:
                 st.info(f'已保存自定义模板: {", ".join(saved)}')
 
+        # ---- Single / Batch generation helper ----
+        def _gen_one_month(gen_year, gen_month, opening_bs_data, engine, full_name):
+            """Generate all 3 statements for a single month. Returns (pl, bs, cf, period_label)."""
+            gen_upload_dir = os.path.join(UPLOADS_DIR, company, f'{gen_year}-{gen_month:02d}')
+            period_label = f'{gen_year}年1-{gen_month}月'
+            output_dir = os.path.join(OUTPUT_DIR, company)
+            os.makedirs(output_dir, exist_ok=True)
+            tpl_base = os.path.join(DATA_DIR, 'templates', company)
+
+            # Extract
+            results = {}
+            ie = InvoiceExtractor(os.path.join(gen_upload_dir, 'sales.xlsx'))
+            results['sales'], _ = ie.extract()
+            ie2 = InvoiceExtractor(os.path.join(gen_upload_dir, 'costs.xlsx'))
+            results['costs'], _ = ie2.extract()
+            be1 = BankExtractor(os.path.join(gen_upload_dir, 'nong.xls'), 'nonghang')
+            be2 = BankExtractor(os.path.join(gen_upload_dir, 'xinyong.xls'), 'xinyongshe')
+            bank_data = {'农行': be1.extract(), '信用社': be2.extract()}
+            bank_end = sum(b['end_balance'] for b in bank_data.values())
+            pe = PayrollExtractor(os.path.join(gen_upload_dir, 'payroll.xlsx'))
+            payroll_data = {gen_month: pe.extract()}
+
+            # Calculate
+            calc = CalcEngine(opening_bs_data)
+            pl = calc.calculate_pl(
+                {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
+                payroll_data, engine.get_mappings('pl'), {gen_month: bank_data}, gen_month)
+            fa_add = pl['_detail']['fa_add']
+            bs = calc.calculate_bs(pl, bank_end, fa_add, gen_month)
+            cf = calc.calculate_cf(pl, bs, {gen_month: bank_data},
+                {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
+                payroll_data, fa_add, gen_month)
+
+            # Helper for render/fill
+            def _render_or_fill(stype, preset_map, stype_label):
+                custom_cfg = load_custom_config(company, stype)
+                tp = os.path.join(tpl_base, f'{stype}_custom.xlsx') if tpl_base else None
+                op = os.path.join(output_dir,
+                    f'{company}_{gen_year}年1-{gen_month}月_{stype_label}.xlsx')
+                if custom_cfg and tp and os.path.exists(tp):
+                    fill_custom_template(tp, custom_cfg['field_map'], preset_map, op,
+                        company_name=full_name, period_label=period_label)
+                else:
+                    cfg = te.load_preset(stype)
+                    r = ReportRenderer(cfg)
+                    r.render(full_name, period_label, preset_map, op)
+                return op
+
+            # PL
+            pl_map = {
+                '一、营业收入': {0: pl['revenue'], 1: pl['revenue']},
+                '减：营业成本': {0: pl['cogs'], 1: pl['cogs']},
+                '税金及附加': {0: pl['surcharges'], 1: pl['surcharges']},
+                '管理费用': {0: pl['admin_exp'], 1: pl['admin_exp']},
+                '财务费用': {0: pl['fin_exp'], 1: pl['fin_exp']},
+                '二、营业利润（亏损以"-"号填列）': {0: pl['oper_profit'], 1: pl['oper_profit']},
+                '三、利润总额（亏损总额以"-"号填列）': {0: pl['total_profit'], 1: pl['total_profit']},
+                '四、净利润（净亏损以"-"号填列）': {0: pl['net_profit'], 1: pl['net_profit']},
+            }
+            _render_or_fill('pl', pl_map, '利润表')
+
+            # BS
+            bs_map = {}
+            for name, end, beg in [
+                ('货币资金', bs.get('cash'), opening_bs_data.get('货币资金')),
+                ('应收账款', bs.get('ar'), opening_bs_data.get('应收账款')),
+                ('预付账款', bs.get('prepay'), opening_bs_data.get('预付账款')),
+                ('其他应收款', bs.get('other_recv'), opening_bs_data.get('其他应收款')),
+                ('存货', bs.get('inventory'), opening_bs_data.get('存货')),
+                ('流动资产合计', bs.get('curr_assets'), opening_bs_data.get('流动资产合计')),
+                ('固定资产原价', bs.get('fa_orig'), opening_bs_data.get('固定资产原价')),
+                ('减：累计折旧', bs.get('acc_depr'), bs.get('acc_depr_beg')),
+                ('固定资产账面价值', bs.get('fa_net'), opening_bs_data.get('固定资产账面价值')),
+                ('长期待摊费用', bs.get('ltd'), opening_bs_data.get('长期待摊费用')),
+                ('非流动资产合计', bs.get('non_curr_assets'), opening_bs_data.get('非流动资产合计')),
+                ('资产总计', bs.get('total_assets'), opening_bs_data.get('资产总计')),
+                ('应付账款', bs.get('ap'), opening_bs_data.get('应付账款')),
+                ('预收账款', bs.get('pr'), opening_bs_data.get('预收账款')),
+                ('应付职工薪酬', bs.get('payroll_payable'), opening_bs_data.get('应付职工薪酬')),
+                ('应交税费', bs.get('tax_payable'), opening_bs_data.get('应交税费')),
+                ('其他应付款', bs.get('other_pay'), opening_bs_data.get('其他应付款')),
+                ('流动负债合计', bs.get('curr_liab'), opening_bs_data.get('流动负债合计')),
+                ('负债合计', bs.get('total_liab'), opening_bs_data.get('负债合计')),
+                ('实收资本（或股本）', bs.get('capital'), opening_bs_data.get('实收资本（或股本）')),
+                ('未分配利润', bs.get('undist_profit_end'), bs.get('undist_profit_beg')),
+                ('所有者权益（或股东权益）合计', bs.get('total_equity'), opening_bs_data.get('所有者权益（或股东权益）合计')),
+                ('负债和所有者权益（或股东权益）总计', bs.get('total_le'), opening_bs_data.get('负债和所有者权益（或股东权益）总计')),
+            ]:
+                bs_map[name] = {0: end, 1: beg}
+            _render_or_fill('bs', bs_map, '资产负债表')
+
+            # CF
+            cf_items = [
+                '销售产成品、商品、提供劳务收到的现金', '收到的其他与经营活动有关的现金',
+                '购买原材料、商品、接受劳务支付的现金', '支付的职工薪酬', '支付的税费',
+                '支付的其他与经营活动有关的现金', '经营活动产生的现金流量净额',
+                '收回短期投资、长期债券投资和长期股权投资收到的现金', '取得投资收益收到的现金',
+                '处置固定资产、无形资产和其他非流动资产收回的现金净额',
+                '短期投资、长期债券投资和长期股权投资支付的现金',
+                '购建固定资产、无形资产和其他非流动资产支付的现金', '投资活动产生的现金流量净额',
+                '取得借款收到的现金', '吸收投资者投资收到的现金', '偿还借款本金支付的现金',
+                '偿还借款利息支付的现金', '分配利润支付的现金', '筹资活动产生的现金流量净额',
+                '四、现金净增加额', '加：期初现金余额', '五、期末现金余额',
+                '净利润', '加：计提的资产减值准备', '固定资产折旧', '无形资产摊销',
+                '长期待摊费用摊销', '待摊费用减少（减：增加）', '预提费用增加（减：减少）',
+                '处置固定资产、无形资产和其他非流动资产损失（减：收益）', '固定资产报废损失',
+                '财务费用', '投资损失（减：收益）', '递延税款贷项（减：借项）',
+                '存货的减少（减：增加）', '经营性应收项目的减少（减：增加）',
+                '经营性应付项目的增加（减：减少）', '其他',
+                '债务转为资本', '一年内到期的可转换公司债券', '融资租入固定资产',
+                '现金的期末余额', '减：现金的期初余额', '加：现金等价物的期末余额',
+                '减：现金等价物的期初余额', '现金及现金等价物净增加额',
+            ]
+            cf_map = {}
+            for key in cf_items:
+                val = cf.get(key)
+                if val is not None:
+                    cf_map[key] = {0: val, 1: round(val / gen_month, 2) if gen_month else None}
+            _render_or_fill('cf', cf_map, '现金流量表')
+
+            # Save summary
+            import datetime as _dt
+            summary = {
+                'generated_at': _dt.datetime.now().isoformat(),
+                'period': period_label, 'year': gen_year, 'month': gen_month,
+                'pl': {k: v for k, v in pl.items() if not k.startswith('_')},
+                'bs': {k: v for k, v in bs.items() if not k.startswith('_')},
+                'cf': {k: v for k, v in cf.items() if not k.startswith('_')},
+            }
+            summary_path = os.path.join(output_dir, f'summary_{gen_year}_{gen_month:02d}.json')
+            with open(summary_path, 'w', encoding='utf-8') as sf:
+                json.dump(summary, sf, ensure_ascii=False, indent=2)
+
+            return pl, bs, cf, period_label
+
+        # ---- Batch Generation ----
+        uploads_base = os.path.join(UPLOADS_DIR, company)
+        available_months = []
+        if os.path.exists(uploads_base):
+            for dname in sorted(os.listdir(uploads_base)):
+                dpath = os.path.join(uploads_base, dname)
+                if not os.path.isdir(dpath):
+                    continue
+                required = ['sales.xlsx', 'costs.xlsx', 'nong.xls', 'xinyong.xls', 'payroll.xlsx']
+                if not [f for f in required if not os.path.exists(os.path.join(dpath, f))]:
+                    available_months.append(dname)
+
+        if len(available_months) >= 2:
+            st.divider()
+            st.subheader('⚡ 批量生成')
+            batch_selected = st.multiselect(
+                '选择要批量生成的月份', available_months,
+                default=available_months[-min(6, len(available_months)):],
+                help='默认选最近6个月。可多选后一键生成。'
+            )
+            c_b1, c_b2 = st.columns([1, 2])
+            with c_b1:
+                if st.button(f'🚀 批量生成 ({len(batch_selected)} 个月)', type='primary',
+                             use_container_width=True, disabled=len(batch_selected) < 2):
+                    config = load_company_config(company)
+                    opening_bs_data = config.get('opening_bs', {})
+                    if not opening_bs_data:
+                        st.error('请先到「公司档案」页填写年初余额')
+                    else:
+                        full_name = config.get('full_name', company)
+                        engine = MappingEngine(get_company_dir(company))
+                        prog = st.progress(0)
+                        st_text = st.empty()
+                        batch_ok = 0
+                        batch_fail = 0
+                        for idx, dir_label in enumerate(batch_selected):
+                            parts = dir_label.split('-')
+                            if len(parts) != 2:
+                                continue
+                            gy = int(parts[0])
+                            gm = int(parts[1])
+                            st_text.text(f'🔄 {gy}年{gm}月 — 生成中...')
+                            try:
+                                _gen_one_month(gy, gm, opening_bs_data, engine, full_name)
+                                batch_ok += 1
+                            except Exception as e:
+                                batch_fail += 1
+                                st.warning(f'{dir_label}: {e}')
+                            prog.progress((idx + 1) / len(batch_selected))
+                        prog.empty()
+                        st_text.empty()
+                        if batch_ok > 0:
+                            st.success(f'✅ 批量完成: {batch_ok} 个月成功' +
+                                       (f', {batch_fail} 个失败' if batch_fail else ''))
+
+            with c_b2:
+                if available_months:
+                    st.caption(f'已检测到 {len(available_months)} 个月的数据: {", ".join(available_months)}')
+
+        st.divider()
+        st.subheader('📅 单月生成')
         if st.button('🚀 生成三大报表', type='primary', use_container_width=True):
             with st.spinner('正在生成报表...'):
                 config = load_company_config(company)
@@ -576,51 +772,14 @@ elif st.session_state.page == '报表生成':
                 if not opening_bs:
                     st.error('请先到「公司档案」页填写年初余额')
                     st.stop()
-
-                # Extract
-                results = {}
-                sales_path = os.path.join(upload_dir, 'sales.xlsx')
-                costs_path = os.path.join(upload_dir, 'costs.xlsx')
-                nong_path = os.path.join(upload_dir, 'nong.xls')
-                xin_path = os.path.join(upload_dir, 'xin.xls')
-                payroll_path = os.path.join(upload_dir, 'payroll.xlsx')
-
-                if os.path.exists(sales_path):
-                    results['sales'] = InvoiceExtractor(sales_path).extract()[0]
-                if os.path.exists(costs_path):
-                    results['costs'] = InvoiceExtractor(costs_path).extract()[0]
-
-                bank_data = {}
-                bank_end = 0.0
-                for label, btype, fpath in [
-                    ('农行', BankExtractor.BANK_NONGHANG, nong_path),
-                    ('信用社', BankExtractor.BANK_XINYONGSHE, xin_path),
-                ]:
-                    if os.path.exists(fpath):
-                        be = BankExtractor(fpath, btype)
-                        r = be.extract()
-                        bank_data[label] = r
-                        bank_end += r['end_balance']
-
-                payroll_data = {}
-                if os.path.exists(payroll_path):
-                    payroll_data[month] = PayrollExtractor(payroll_path).extract()
-
-                # Calculate
+                full_name = config.get('full_name', company)
                 engine = MappingEngine(company_dir)
-                calc = CalcEngine(opening_bs)
-                num_months = month
-
-                pl = calc.calculate_pl(
-                    {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
-                    payroll_data,
-                    engine.get_mappings('pl'),
-                    {month: bank_data},
-                    num_months,
-                )
-
-                fa_add = pl['_detail']['fa_add']
-                bs = calc.calculate_bs(pl, bank_end, fa_add, num_months)
+                pl, bs, cf, period_label = _gen_one_month(year, month, opening_bs, engine, full_name)
+                bs_date = f'{year}年{month}月28日'
+                output_dir = os.path.join(OUTPUT_DIR, company)
+                pl_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_利润表.xlsx')
+                bs_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_资产负债表.xlsx')
+                cf_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_现金流量表.xlsx')
 
                 # Validate
                 v_passed, v_errors, v_warnings = validate_balance(pl, bs)
@@ -635,7 +794,7 @@ elif st.session_state.page == '报表生成':
                 with c3:
                     st.metric('资产总计', f'¥{bs["total_assets"]:,.2f}' if bs['total_assets'] else '¥0.00')
                 with c4:
-                    st.metric('银行余额', f'¥{bank_end:,.2f}')
+                    st.metric('银行余额', f'¥{bs["cash"]:,.2f}' if bs.get('cash') else '¥0.00')
 
                 # Validation
                 if v_passed:
@@ -647,143 +806,8 @@ elif st.session_state.page == '报表生成':
                     for w in v_warnings:
                         st.warning(format_validation_message(w))
 
-                # ---- Render helpers ----
-                period_label = f'{year}年1-{month}月'
-                bs_date = f'{year}年{month}月28日'
-                output_dir = os.path.join(OUTPUT_DIR, company)
-                os.makedirs(output_dir, exist_ok=True)
-                full_name = config.get('full_name', company)
-                tpl_base = os.path.join(DATA_DIR, 'templates', company)
-
-                def _render_or_fill(stype, preset_map, stype_label):
-                    """Render using custom template if available, else preset."""
-                    custom_cfg = load_custom_config(company, stype)
-                    tpl_path = os.path.join(tpl_base, f'{stype}_custom.xlsx') if tpl_base else None
-                    output_path = os.path.join(output_dir,
-                        f'{company}_{year}年1-{month}月_{stype_label}.xlsx')
-
-                    if custom_cfg and tpl_path and os.path.exists(tpl_path):
-                        # Use custom template
-                        fill_custom_template(
-                            tpl_path, custom_cfg['field_map'], preset_map,
-                            output_path, company_name=full_name, period_label=period_label)
-                        return output_path
-                    else:
-                        # Use preset renderer
-                        cfg = te.load_preset(stype)
-                        renderer = ReportRenderer(cfg)
-                        renderer.render(full_name, period_label, preset_map, output_path)
-                        return output_path
-
-                # PL data map
-                pl_map = {
-                    '一、营业收入': {0: pl['revenue'], 1: pl['revenue']},
-                    '减：营业成本': {0: pl['cogs'], 1: pl['cogs']},
-                    '税金及附加': {0: pl['surcharges'], 1: pl['surcharges']},
-                    '管理费用': {0: pl['admin_exp'], 1: pl['admin_exp']},
-                    '财务费用': {0: pl['fin_exp'], 1: pl['fin_exp']},
-                    '二、营业利润（亏损以"-"号填列）': {0: pl['oper_profit'], 1: pl['oper_profit']},
-                    '三、利润总额（亏损总额以"-"号填列）': {0: pl['total_profit'], 1: pl['total_profit']},
-                    '四、净利润（净亏损以"-"号填列）': {0: pl['net_profit'], 1: pl['net_profit']},
-                }
-                pl_path = _render_or_fill('pl', pl_map, '利润表')
                 st.session_state.generated_pl_path = pl_path
-
-                # BS data map
-                bs_map = {}
-                asset_items = [('货币资金', bs.get('cash'), opening_bs.get('货币资金')),
-                    ('应收账款', bs.get('ar'), opening_bs.get('应收账款')),
-                    ('预付账款', bs.get('prepay'), opening_bs.get('预付账款')),
-                    ('其他应收款', bs.get('other_recv'), opening_bs.get('其他应收款')),
-                    ('存货', bs.get('inventory'), opening_bs.get('存货')),
-                    ('流动资产合计', bs.get('curr_assets'), opening_bs.get('流动资产合计')),
-                    ('固定资产原价', bs.get('fa_orig'), opening_bs.get('固定资产原价')),
-                    ('减：累计折旧', bs.get('acc_depr'), bs.get('acc_depr_beg')),
-                    ('固定资产账面价值', bs.get('fa_net'), opening_bs.get('固定资产账面价值')),
-                    ('长期待摊费用', bs.get('ltd'), opening_bs.get('长期待摊费用')),
-                    ('非流动资产合计', bs.get('non_curr_assets'), opening_bs.get('非流动资产合计')),
-                    ('资产总计', bs.get('total_assets'), opening_bs.get('资产总计')),
-                ]
-                liab_items = [('应付账款', bs.get('ap'), opening_bs.get('应付账款')),
-                    ('预收账款', bs.get('pr'), opening_bs.get('预收账款')),
-                    ('应付职工薪酬', bs.get('payroll_payable'), opening_bs.get('应付职工薪酬')),
-                    ('应交税费', bs.get('tax_payable'), opening_bs.get('应交税费')),
-                    ('其他应付款', bs.get('other_pay'), opening_bs.get('其他应付款')),
-                    ('流动负债合计', bs.get('curr_liab'), opening_bs.get('流动负债合计')),
-                    ('负债合计', bs.get('total_liab'), opening_bs.get('负债合计')),
-                    ('实收资本（或股本）', bs.get('capital'), opening_bs.get('实收资本（或股本）')),
-                    ('未分配利润', bs.get('undist_profit_end'), bs.get('undist_profit_beg')),
-                    ('所有者权益（或股东权益）合计', bs.get('total_equity'), opening_bs.get('所有者权益（或股东权益）合计')),
-                    ('负债和所有者权益（或股东权益）总计', bs.get('total_le'), opening_bs.get('负债和所有者权益（或股东权益）总计')),
-                ]
-                for name, end, beg in asset_items + liab_items:
-                    bs_map[name] = {0: end, 1: beg}
-
-                bs_path = _render_or_fill('bs', bs_map, '资产负债表')
                 st.session_state.generated_bs_path = bs_path
-
-                # CF: compute then render
-                cf = calc.calculate_cf(pl, bs, {month: bank_data},
-                                       {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
-                                       payroll_data, fa_add, num_months)
-
-                # Build CF data map: key = template item name, value = {0: cumulative, 1: monthly}
-                cf_items = [
-                    '销售产成品、商品、提供劳务收到的现金',
-                    '收到的其他与经营活动有关的现金',
-                    '购买原材料、商品、接受劳务支付的现金',
-                    '支付的职工薪酬',
-                    '支付的税费',
-                    '支付的其他与经营活动有关的现金',
-                    '经营活动产生的现金流量净额',
-                    '收回短期投资、长期债券投资和长期股权投资收到的现金',
-                    '取得投资收益收到的现金',
-                    '处置固定资产、无形资产和其他非流动资产收回的现金净额',
-                    '短期投资、长期债券投资和长期股权投资支付的现金',
-                    '购建固定资产、无形资产和其他非流动资产支付的现金',
-                    '投资活动产生的现金流量净额',
-                    '取得借款收到的现金',
-                    '吸收投资者投资收到的现金',
-                    '偿还借款本金支付的现金',
-                    '偿还借款利息支付的现金',
-                    '分配利润支付的现金',
-                    '筹资活动产生的现金流量净额',
-                    '四、现金净增加额',
-                    '加：期初现金余额',
-                    '五、期末现金余额',
-                    # Indirect method (supplementary)
-                    '净利润',
-                    '加：计提的资产减值准备',
-                    '固定资产折旧',
-                    '无形资产摊销',
-                    '长期待摊费用摊销',
-                    '待摊费用减少（减：增加）',
-                    '预提费用增加（减：减少）',
-                    '处置固定资产、无形资产和其他非流动资产损失（减：收益）',
-                    '固定资产报废损失',
-                    '财务费用',
-                    '投资损失（减：收益）',
-                    '递延税款贷项（减：借项）',
-                    '存货的减少（减：增加）',
-                    '经营性应收项目的减少（减：增加）',
-                    '经营性应付项目的增加（减：减少）',
-                    '其他',
-                    '债务转为资本',
-                    '一年内到期的可转换公司债券',
-                    '融资租入固定资产',
-                    '现金的期末余额',
-                    '减：现金的期初余额',
-                    '加：现金等价物的期末余额',
-                    '减：现金等价物的期初余额',
-                    '现金及现金等价物净增加额',
-                ]
-                cf_map = {}
-                for key in cf_items:
-                    val = cf.get(key)
-                    if val is not None:
-                        cf_map[key] = {0: val, 1: round(val / num_months, 2) if num_months else None}
-
-                cf_path = _render_or_fill('cf', cf_map, '现金流量表')
                 st.session_state.generated_cf_path = cf_path
 
                 # Save results for analysis report
@@ -793,20 +817,6 @@ elif st.session_state.page == '报表生成':
                 st.session_state.last_opening_bs = opening_bs
                 st.session_state.last_period_label = period_label
                 st.session_state.last_bs_date = bs_date
-
-                # Save summary JSON for historical comparison
-                import datetime as _dt
-                summary = {
-                    'generated_at': _dt.datetime.now().isoformat(),
-                    'period': period_label,
-                    'year': year, 'month': month,
-                    'pl': {k: v for k, v in pl.items() if not k.startswith('_')},
-                    'bs': {k: v for k, v in bs.items() if not k.startswith('_')},
-                    'cf': {k: v for k, v in cf.items() if not k.startswith('_')},
-                }
-                summary_path = os.path.join(output_dir, f'summary_{year}_{month:02d}.json')
-                with open(summary_path, 'w', encoding='utf-8') as sf:
-                    json.dump(summary, sf, ensure_ascii=False, indent=2)
 
                 st.success(f'✅ 报表已生成！')
                 st.info(f'利润表: {pl_path}\n资产负债表: {bs_path}')

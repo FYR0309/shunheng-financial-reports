@@ -30,7 +30,7 @@
 - [x] Word 分析报告 `generate_analysis_docx.py` 集成到 app.py ✅ 2026-06-29
 - [x] 自定义模板上传解析 `template_engine.parse_custom_template()` ✅ 2026-06-29
 - [x] 多期历史对比 ✅ 2026-06-29 (替代审计日志)
-- [ ] 多月份批量生成
+- [x] 多月份批量生成 ✅ 2026-06-29
 
 ## 关键数字（顺恒已验证）
 
