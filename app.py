@@ -104,7 +104,7 @@ with st.sidebar:
 
     st.divider()
 
-    pages = ['首页', '公司档案', '科目映射', '数据导入', '数据核验', '报表生成', '分析导出']
+    pages = ['首页', '公司档案', '科目映射', '数据导入', '数据核验', '报表生成', '分析导出', '历史对比']
     selected = st.radio('导航', pages, index=pages.index(st.session_state.page))
     st.session_state.page = selected
 
@@ -794,6 +794,20 @@ elif st.session_state.page == '报表生成':
                 st.session_state.last_period_label = period_label
                 st.session_state.last_bs_date = bs_date
 
+                # Save summary JSON for historical comparison
+                import datetime as _dt
+                summary = {
+                    'generated_at': _dt.datetime.now().isoformat(),
+                    'period': period_label,
+                    'year': year, 'month': month,
+                    'pl': {k: v for k, v in pl.items() if not k.startswith('_')},
+                    'bs': {k: v for k, v in bs.items() if not k.startswith('_')},
+                    'cf': {k: v for k, v in cf.items() if not k.startswith('_')},
+                }
+                summary_path = os.path.join(output_dir, f'summary_{year}_{month:02d}.json')
+                with open(summary_path, 'w', encoding='utf-8') as sf:
+                    json.dump(summary, sf, ensure_ascii=False, indent=2)
+
                 st.success(f'✅ 报表已生成！')
                 st.info(f'利润表: {pl_path}\n资产负债表: {bs_path}')
 
@@ -894,6 +908,241 @@ elif st.session_state.page == '分析导出':
     st.divider()
     out_dir = os.path.join(OUTPUT_DIR, st.session_state.current_company) if st.session_state.current_company else OUTPUT_DIR
     st.caption(f'报表保存位置：{out_dir}')
+
+# ================================================================
+# PAGE: 历史对比
+# ================================================================
+elif st.session_state.page == '历史对比':
+    st.header('📈 历史对比')
+
+    if not st.session_state.current_company:
+        st.info('请先选择公司')
+    else:
+        company = st.session_state.current_company
+        output_dir = os.path.join(OUTPUT_DIR, company)
+
+        # Scan for available summaries
+        summaries = {}
+        if os.path.exists(output_dir):
+            for fname in sorted(os.listdir(output_dir)):
+                if fname.startswith('summary_') and fname.endswith('.json'):
+                    path = os.path.join(output_dir, fname)
+                    try:
+                        with open(path, 'r', encoding='utf-8') as sf:
+                            s = json.load(sf)
+                        period = s.get('period', fname)
+                        summaries[period] = s
+                    except Exception:
+                        pass
+
+        if len(summaries) < 2:
+            st.info(f'需要至少生成2个月份的报表才能对比。当前: {len(summaries)} 个')
+            if summaries:
+                st.caption(f'可用月份: {", ".join(summaries.keys())}')
+        else:
+            periods = list(summaries.keys())
+            selected = st.multiselect(
+                '选择对比月份（可多选）', periods,
+                default=periods[-min(6, len(periods)):],
+                help='选择要对比的月份，按选择顺序排列'
+            )
+
+            if len(selected) < 2:
+                st.info('请至少选择2个月份')
+            else:
+                # ---- PL Comparison ----
+                st.subheader('📊 利润表对比')
+
+                pl_fields = [
+                    ('revenue', '营业收入'),
+                    ('cogs', '营业成本'),
+                    ('surcharges', '税金及附加'),
+                    ('selling_exp', '销售费用'),
+                    ('admin_exp', '管理费用'),
+                    ('fin_exp', '财务费用'),
+                    ('oper_profit', '营业利润'),
+                    ('total_profit', '利润总额'),
+                    ('net_profit', '净利润'),
+                ]
+
+                # Build comparison table
+                pl_header = ['项目'] + selected
+                n_cols = len(pl_header)
+                # Add change column for 2-period comparison
+                if len(selected) == 2:
+                    pl_header.append('变动额')
+                    pl_header.append('变动率')
+                    n_cols = len(pl_header)
+
+                pl_numeric = []
+                for fkey, fname in pl_fields:
+                    vals = []
+                    for s in selected:
+                        pl_data = summaries[s].get('pl', {})
+                        v = pl_data.get(fkey)
+                        vals.append(v)
+                    pl_numeric.append((fkey, fname, vals))
+
+                # Render PL table
+                pl_table = '| ' + ' | '.join(pl_header) + ' |\n'
+                pl_table += '|' + '|'.join(['---'] * n_cols) + '|\n'
+                for fkey, fname, vals in pl_numeric:
+                    formatted = []
+                    for v in vals:
+                        if v is None:
+                            formatted.append('—')
+                        else:
+                            formatted.append(f'{v:,.2f}')
+                    if len(selected) == 2 and vals[0] is not None and vals[1] is not None:
+                        change = vals[0] - vals[1]
+                        pct = (change / vals[1] * 100) if vals[1] != 0 else 0
+                        change_str = f'{change:+,.2f}'
+                        pct_str = f'{pct:+.1f}%'
+                        if abs(pct) > 30:
+                            change_str += ' ⚠'
+                        if abs(pct) > 50:
+                            change_str += ' 🔴'
+                        formatted.append(change_str)
+                        formatted.append(pct_str)
+                    pl_table += '| ' + ' | '.join([fname] + formatted) + ' |\n'
+
+                st.markdown(pl_table)
+
+                # ---- BS Comparison ----
+                st.subheader('📊 资产负债表对比')
+
+                bs_fields = [
+                    ('cash', '货币资金'),
+                    ('ar', '应收账款'),
+                    ('inventory', '存货'),
+                    ('curr_assets', '流动资产合计'),
+                    ('fa_net', '固定资产净值'),
+                    ('total_assets', '资产总计'),
+                    ('ap', '应付账款'),
+                    ('tax_payable', '应交税费'),
+                    ('other_pay', '其他应付款'),
+                    ('total_liab', '负债合计'),
+                    ('capital', '实收资本'),
+                    ('undist_profit_end', '未分配利润'),
+                    ('total_equity', '所有者权益合计'),
+                ]
+
+                bs_header = ['项目'] + selected
+                if len(selected) == 2:
+                    bs_header += ['变动额', '变动率']
+                n_bs = len(bs_header)
+
+                bs_table = '| ' + ' | '.join(bs_header) + ' |\n'
+                bs_table += '|' + '|'.join(['---'] * n_bs) + '|\n'
+                for fkey, fname in bs_fields:
+                    vals = []
+                    for s in selected:
+                        bs_data = summaries[s].get('bs', {})
+                        v = bs_data.get(fkey)
+                        vals.append(v)
+                    formatted = []
+                    for v in vals:
+                        if v is None:
+                            formatted.append('—')
+                        else:
+                            formatted.append(f'{v:,.2f}')
+                    if len(selected) == 2 and vals[0] is not None and vals[1] is not None:
+                        change = vals[0] - vals[1]
+                        pct = (change / abs(vals[1]) * 100) if vals[1] != 0 else 0
+                        fmt = f'{change:+,.2f}'
+                        if abs(pct) > 30:
+                            fmt += ' ⚠'
+                        formatted.append(fmt)
+                        formatted.append(f'{pct:+.1f}%')
+                    bs_table += '| ' + ' | '.join([fname] + formatted) + ' |\n'
+
+                st.markdown(bs_table)
+
+                # ---- Export to xlsx ----
+                st.divider()
+                if st.button('📥 导出对比表 (Excel)', use_container_width=True):
+                    import openpyxl as _xl
+                    from openpyxl.styles import Font as _Font, Alignment as _Align, Border as _B, Side as _S
+                    wb = _xl.Workbook()
+
+                    def _write_comparison_sheet(ws, title, fields, summaries_data, selected_periods):
+                        ws.title = title
+                        thin = _B(left=_S('thin'), right=_S('thin'), top=_S('thin'), bottom=_S('thin'))
+                        hdr_font = _Font(name='宋体', size=10, bold=True)
+                        num_font = _Font(name='Arial', size=10)
+                        # Headers
+                        headers = ['项目'] + selected_periods
+                        if len(selected_periods) == 2:
+                            headers += ['变动额', '变动率']
+                        for ci, h in enumerate(headers, 1):
+                            c = ws.cell(row=1, column=ci, value=h)
+                            c.font = hdr_font; c.border = thin; c.alignment = _Align(horizontal='center')
+                        # Data
+                        for ri, (fkey, fname) in enumerate(fields, 2):
+                            ws.cell(row=ri, column=1, value=fname).font = _Font(name='宋体', size=10)
+                            ws.cell(row=ri, column=1).border = thin
+                            vals = [summaries_data[s].get(title[:2].lower() if title.startswith('利润') else 'bs', {}).get(fkey) for s in selected_periods]
+                            for ci, v in enumerate(vals, 2):
+                                c = ws.cell(row=ri, column=ci, value=v)
+                                c.font = num_font; c.border = thin; c.number_format = '#,##0.00'
+                            if len(selected_periods) == 2 and vals[0] is not None and vals[1] is not None:
+                                chg = vals[0] - vals[1]
+                                ws.cell(row=ri, column=len(selected_periods)+2, value=chg).font = num_font
+                                ws.cell(row=ri, column=len(selected_periods)+2).number_format = '#,##0.00'
+                                ws.cell(row=ri, column=len(selected_periods)+2).border = thin
+                                pct = chg / abs(vals[1]) * 100 if vals[1] != 0 else 0
+                                ws.cell(row=ri, column=len(selected_periods)+3, value=pct/100).font = num_font
+                                ws.cell(row=ri, column=len(selected_periods)+3).number_format = '0.0%'
+                                ws.cell(row=ri, column=len(selected_periods)+3).border = thin
+                        # Col widths
+                        ws.column_dimensions[_xl.utils.get_column_letter(1)].width = 18
+                        for ci in range(2, len(headers)+2):
+                            ws.column_dimensions[_xl.utils.get_column_letter(ci)].width = 16
+
+                    _write_comparison_sheet(wb.active, '利润表对比', pl_fields, summaries, selected)
+                    ws2 = wb.create_sheet()
+                    _write_comparison_sheet(ws2, '资产负债表对比', bs_fields, summaries, selected)
+
+                    xlsx_path = os.path.join(output_dir, f'{company}_历史对比_{"_".join(selected)}.xlsx')
+                    wb.save(xlsx_path)
+                    with open(xlsx_path, 'rb') as f:
+                        st.download_button('⬇ 下载对比表', f.read(), os.path.basename(xlsx_path),
+                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                            use_container_width=True)
+
+                # Auto-highlight anomalies
+                if len(selected) == 2:
+                    st.divider()
+                    st.subheader('🔍 异常波动检测')
+                    anomalies = []
+                    for fkey, fname in pl_fields + bs_fields:
+                        src = 'pl' if fkey in dict(pl_fields) else 'bs'
+                        v1 = summaries[selected[0]].get(src, {}).get(fkey)
+                        v2 = summaries[selected[1]].get(src, {}).get(fkey)
+                        if v1 is not None and v2 is not None and v2 != 0:
+                            pct = (v1 - v2) / abs(v2) * 100
+                            if abs(pct) > 30:
+                                anomalies.append((fname, v1, v2, pct, src))
+                    if anomalies:
+                        for name, v1, v2, pct, src in anomalies:
+                            icon = '🔴' if abs(pct) > 50 else '⚠'
+                            direction = '增长' if pct > 0 else '下降'
+                            st.warning(
+                                f'{icon} **{name}**: {v2:,.2f} → {v1:,.2f}，{direction} {abs(pct):.1f}%'
+                            )
+                    else:
+                        st.success('✅ 未检测到超过30%的异常波动')
+
+                # Trend sparkline hint
+                if len(selected) >= 3:
+                    st.divider()
+                    st.subheader('📈 趋势简析')
+                    for fkey, fname in pl_fields[:3] + [pl_fields[-1]]:  # revenue, cogs, surcharges, net_profit
+                        vals = [summaries[s].get('pl', {}).get(fkey) for s in selected]
+                        vals_clean = [v for v in vals if v is not None]
+                        if len(vals_clean) >= 2:
+                            trend = '↑ 上升' if vals_clean[-1] > vals_clean[0] else '↓ 下降' if vals_clean[-1] < vals_clean[0] else '→ 持平'
+                            st.caption(f'{fname}: {trend}（{vals_clean[0]:,.0f} → {vals_clean[-1]:,.0f}）')
 
 # ---- Footer ----
 st.divider()
