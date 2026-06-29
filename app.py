@@ -651,6 +651,73 @@ elif st.session_state.page == '报表生成':
                 bs_renderer.render(full_name, bs_date, bs_map, bs_path)
                 st.session_state.generated_bs_path = bs_path
 
+                # Render CF (Cash Flow Statement)
+                cf = calc.calculate_cf(pl, bs, {month: bank_data},
+                                       {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
+                                       payroll_data, fa_add, num_months)
+                cf_cfg = te.load_preset('cf')
+                cf_renderer = ReportRenderer(cf_cfg)
+
+                # Build CF data map: key = template item name, value = {0: cumulative, 1: monthly}
+                cf_items = [
+                    '销售产成品、商品、提供劳务收到的现金',
+                    '收到的其他与经营活动有关的现金',
+                    '购买原材料、商品、接受劳务支付的现金',
+                    '支付的职工薪酬',
+                    '支付的税费',
+                    '支付的其他与经营活动有关的现金',
+                    '经营活动产生的现金流量净额',
+                    '收回短期投资、长期债券投资和长期股权投资收到的现金',
+                    '取得投资收益收到的现金',
+                    '处置固定资产、无形资产和其他非流动资产收回的现金净额',
+                    '短期投资、长期债券投资和长期股权投资支付的现金',
+                    '购建固定资产、无形资产和其他非流动资产支付的现金',
+                    '投资活动产生的现金流量净额',
+                    '取得借款收到的现金',
+                    '吸收投资者投资收到的现金',
+                    '偿还借款本金支付的现金',
+                    '偿还借款利息支付的现金',
+                    '分配利润支付的现金',
+                    '筹资活动产生的现金流量净额',
+                    '四、现金净增加额',
+                    '加：期初现金余额',
+                    '五、期末现金余额',
+                    # Indirect method (supplementary)
+                    '净利润',
+                    '加：计提的资产减值准备',
+                    '固定资产折旧',
+                    '无形资产摊销',
+                    '长期待摊费用摊销',
+                    '待摊费用减少（减：增加）',
+                    '预提费用增加（减：减少）',
+                    '处置固定资产、无形资产和其他非流动资产损失（减：收益）',
+                    '固定资产报废损失',
+                    '财务费用',
+                    '投资损失（减：收益）',
+                    '递延税款贷项（减：借项）',
+                    '存货的减少（减：增加）',
+                    '经营性应收项目的减少（减：增加）',
+                    '经营性应付项目的增加（减：减少）',
+                    '其他',
+                    '债务转为资本',
+                    '一年内到期的可转换公司债券',
+                    '融资租入固定资产',
+                    '现金的期末余额',
+                    '减：现金的期初余额',
+                    '加：现金等价物的期末余额',
+                    '减：现金等价物的期初余额',
+                    '现金及现金等价物净增加额',
+                ]
+                cf_map = {}
+                for key in cf_items:
+                    val = cf.get(key)
+                    if val is not None:
+                        cf_map[key] = {0: val, 1: round(val / num_months, 2) if num_months else None}
+
+                cf_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_现金流量表.xlsx')
+                cf_renderer.render(full_name, period_label, cf_map, cf_path)
+                st.session_state.generated_cf_path = cf_path
+
                 st.success(f'✅ 报表已生成！')
                 st.info(f'利润表: {pl_path}\n资产负债表: {bs_path}')
 
@@ -696,7 +763,14 @@ elif st.session_state.page == '分析导出':
                 st.button('📥 资产负债表（未生成）', disabled=True, use_container_width=True)
 
         with c3:
-            st.button('📥 现金流量表（开发中）', disabled=True, use_container_width=True)
+            if st.session_state.generated_cf_path and os.path.exists(st.session_state.generated_cf_path):
+                with open(st.session_state.generated_cf_path, 'rb') as f:
+                    st.download_button('📥 下载现金流量表', f.read(),
+                        os.path.basename(st.session_state.generated_cf_path),
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        use_container_width=True)
+            else:
+                st.button('📥 现金流量表（未生成）', disabled=True, use_container_width=True)
 
         st.divider()
         st.subheader('📝 分析报告')

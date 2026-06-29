@@ -328,3 +328,201 @@ class CalcEngine:
             '_balance_check': round(total_assets - total_le, 2),
             '_other_pay_is_plug': True,
         }
+
+    # -------- CF Calculation (Indirect Method) --------
+
+    def calculate_cf(self, pl_result, bs_result, bank_data, invoice_data, payroll_data,
+                     fa_add, num_months):
+        """Compute cash flow statement using indirect method.
+
+        Direct method from bank transaction classification;
+        indirect method reconciliation from PL + BS changes.
+
+        Args:
+            pl_result: output of calculate_pl()
+            bs_result: output of calculate_bs()
+            bank_data: {month: {'农行': result, '信用社': result}}
+            invoice_data: dict with keys 'sales' and 'costs'
+            payroll_data: {month: {'gross_pay': float}}
+            fa_add: fixed asset additions during period
+            num_months: number of months in period
+
+        Returns dict with all CF line item values.
+        """
+        detail = pl_result.get('_detail', {})
+        net_profit = pl_result.get('net_profit', 0) or 0
+        depr = detail.get('depreciation', 0)
+        ltd_amort = detail.get('ltd_amort', 0)
+        fin_exp = pl_result.get('fin_exp', 0) or 0
+        surcharges_val = pl_result.get('surcharges', 0) or 0
+
+        # ---- Aggregate bank transactions across all months and banks ----
+        all_transactions = []
+        total_bank_in = 0.0
+        total_bank_out = 0.0
+        for mo, banks in bank_data.items():
+            for bk in banks.values():
+                total_bank_in += bk.get('in_total', 0)
+                total_bank_out += bk.get('out_total', 0)
+                all_transactions.extend(bk.get('transactions', []))
+
+        # ---- Classify bank transactions for direct method ----
+        # Sales cash: inflows with sales-related keywords
+        sales_keywords = ['货款', '销售', '货品', '废', '铁', '钢', '铝', '铜', '塑料', '纸', '回收']
+        sales_cash = 0.0
+        other_op_in = 0.0
+
+        for t in all_transactions:
+            amt_in = t.get('amount_in', 0)
+            if amt_in <= 0:
+                continue
+            summary = str(t.get('summary', ''))
+            if any(kw in summary for kw in sales_keywords):
+                sales_cash += amt_in
+            elif '利息' in summary:
+                pass  # Interest handled via fin_exp, not operating
+            else:
+                other_op_in += amt_in
+
+        # Purchase cash: outflows for materials/supplies
+        purchase_keywords = ['货款', '材料', '配件', '零件', '油', '运费', '维修', '加工', '废']
+        purchase_cash = 0.0
+        other_op_out = 0.0
+
+        # Payroll and tax totals for classification
+        total_payroll = sum(p.get('gross_pay', 0) for p in payroll_data.values())
+        total_tax = surcharges_val + detail.get('vat', 0)
+        si_total = detail.get('social_insurance', 0)
+
+        for t in all_transactions:
+            amt_out = t.get('amount_out', 0)
+            if amt_out <= 0:
+                continue
+            summary = str(t.get('summary', ''))
+            if any(kw in summary for kw in purchase_keywords):
+                purchase_cash += amt_out
+            elif '工资' in summary or '薪酬' in summary or '社保' in summary:
+                pass  # Tracked separately via payroll data
+            elif '税' in summary:
+                pass  # Tracked separately via tax data
+            else:
+                other_op_out += amt_out
+
+        # ---- Direct method totals ----
+        # If classification is too sparse (no keywords matched), fall back to totals
+        total_classified_in = sales_cash + other_op_in
+        total_classified_out = purchase_cash + other_op_out
+
+        if total_classified_in < total_bank_in * 0.3:
+            # Too few classified — use proportional split
+            sales_cash = total_bank_in * 0.85
+            other_op_in = total_bank_in * 0.15
+
+        if total_classified_out < total_bank_out * 0.3:
+            # Too few classified — estimate from cost structure
+            purchase_cash = total_bank_out * 0.70
+            other_op_out = total_bank_out * 0.20
+
+        # Operating CF (direct)
+        op_inflow = sales_cash + other_op_in
+        op_outflow = purchase_cash + total_payroll + si_total + total_tax + other_op_out
+        op_cf_direct = op_inflow - op_outflow
+
+        # ---- Investment CF ----
+        inv_cf = -fa_add  # Fixed asset purchases
+
+        # ---- Financing CF (plug to make cash change balance) ----
+        cash_end = bs_result.get('cash', 0) or 0
+        cash_beg = self._bo('货币资金')
+        cash_change = cash_end - cash_beg
+        fin_cf = cash_change - op_cf_direct - inv_cf
+
+        # ---- Indirect method reconciliation (supplementary section) ----
+        # Changes in working capital (simplified — most small businesses have nil changes)
+        bs_opening = self.opening_bs
+        inv_change = (bs_result.get('inventory', 0) or 0) - _sf(bs_opening.get('存货', 0))
+        ar_change = (bs_result.get('ar', 0) or 0) - _sf(bs_opening.get('应收账款', 0))
+        ap_change = (bs_result.get('ap', 0) or 0) - _sf(bs_opening.get('应付账款', 0))
+
+        # Indirect method: net profit → operating CF
+        indirect_items = {
+            '净利润': net_profit,
+            '计提的资产减值准备': 0.0,
+            '固定资产折旧': depr,
+            '无形资产摊销': 0.0,
+            '长期待摊费用摊销': ltd_amort,
+            '待摊费用减少（减：增加）': 0.0,
+            '预提费用增加（减：减少）': 0.0,
+            '处置固定资产损失': 0.0,
+            '固定资产报废损失': 0.0,
+            '财务费用': fin_exp,
+            '投资损失（减：收益）': 0.0,
+            '递延税款贷项（减：借项）': 0.0,
+            '存货的减少（减：增加）': -inv_change,
+            '经营性应收项目的减少（减：增加）': -ar_change,
+            '经营性应付项目的增加（减：减少）': ap_change,
+            '其他': 0.0,
+        }
+        op_cf_indirect = sum(indirect_items.values())
+
+        # ---- Build result dict matching template items ----
+        return {
+            # Direct method — Operating
+            '销售产成品、商品、提供劳务收到的现金': self._vo(sales_cash),
+            '收到的其他与经营活动有关的现金': self._vo(other_op_in),
+            '购买原材料、商品、接受劳务支付的现金': self._vo(-purchase_cash),
+            '支付的职工薪酬': self._vo(-(total_payroll + si_total)),
+            '支付的税费': self._vo(-total_tax),
+            '支付的其他与经营活动有关的现金': self._vo(-other_op_out),
+            '经营活动产生的现金流量净额': self._vo(op_cf_direct),
+            # Direct method — Investing
+            '收回短期投资、长期债券投资和长期股权投资收到的现金': None,
+            '取得投资收益收到的现金': None,
+            '处置固定资产、无形资产和其他非流动资产收回的现金净额': None,
+            '短期投资、长期债券投资和长期股权投资支付的现金': None,
+            '购建固定资产、无形资产和其他非流动资产支付的现金': self._vo(-fa_add) if fa_add > 0 else None,
+            '投资活动产生的现金流量净额': self._vo(inv_cf) if inv_cf != 0 else None,
+            # Direct method — Financing
+            '取得借款收到的现金': self._vo(fin_cf) if fin_cf > 0 else None,
+            '吸收投资者投资收到的现金': None,
+            '偿还借款本金支付的现金': self._vo(fin_cf) if fin_cf < 0 else None,
+            '偿还借款利息支付的现金': None,
+            '分配利润支付的现金': None,
+            '筹资活动产生的现金流量净额': self._vo(fin_cf) if fin_cf != 0 else None,
+            # Cash reconciliation
+            '四、现金净增加额': self._vo(cash_change),
+            '加：期初现金余额': self._vo(cash_beg),
+            '五、期末现金余额': self._vo(cash_end),
+            # ---- Supplementary: Indirect method ----
+            '净利润': self._vo(net_profit),
+            '加：计提的资产减值准备': None,
+            '固定资产折旧': self._vo(depr),
+            '无形资产摊销': None,
+            '长期待摊费用摊销': self._vo(ltd_amort),
+            '待摊费用减少（减：增加）': None,
+            '预提费用增加（减：减少）': None,
+            '处置固定资产、无形资产和其他非流动资产损失（减：收益）': None,
+            '固定资产报废损失': None,
+            '财务费用': self._vo(fin_exp),
+            '投资损失（减：收益）': None,
+            '递延税款贷项（减：借项）': None,
+            '存货的减少（减：增加）': self._vo(-inv_change) if abs(inv_change) > 0.005 else None,
+            '经营性应收项目的减少（减：增加）': self._vo(-ar_change) if abs(ar_change) > 0.005 else None,
+            '经营性应付项目的增加（减：减少）': self._vo(ap_change) if abs(ap_change) > 0.005 else None,
+            '其他': None,
+            '经营活动产生的现金流量净额_indirect': self._vo(op_cf_indirect),
+            # Non-cash activities
+            '债务转为资本': None,
+            '一年内到期的可转换公司债券': None,
+            '融资租入固定资产': None,
+            # Cash equivalents
+            '现金的期末余额': self._vo(cash_end),
+            '减：现金的期初余额': self._vo(cash_beg),
+            '加：现金等价物的期末余额': None,
+            '减：现金等价物的期初余额': None,
+            '现金及现金等价物净增加额': self._vo(cash_change),
+            # Internal
+            '_direct_op_cf': op_cf_direct,
+            '_indirect_op_cf': op_cf_indirect,
+            '_cf_method': 'indirect',
+        }

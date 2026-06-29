@@ -19,14 +19,14 @@
 | 模板引擎 | `template_engine.py` | ✅ 预置三表JSON配置 |
 | 数据抽取器 | `data_extractor.py` | ✅ 发票/银行/工资 |
 | 科目映射器 | `mapping_engine.py` | ✅ 三种规则类型 |
-| 计算引擎 | `calc_engine.py` | ✅ PL + BS 计算 |
+| 计算引擎 | `calc_engine.py` | ✅ PL + BS + CF 计算 |
 | 格式渲染器 | `format_renderer.py` | ✅ 宋体/Arial，完整边框 |
 | 验证器 | `validator.py` | ✅ 三层检查 |
-| Web界面 | `app.py` | ✅ 7个页面全部实现 |
+| Web界面 | `app.py` | ✅ 7个页面全部实现，三大报表均可生成下载 |
 
 ## 待开发（第二期）
 
-- [ ] 现金流量表（间接法）完整生成 `calc_engine.calculate_cf()`
+- [x] 现金流量表（间接法）完整生成 `calc_engine.calculate_cf()` ✅ 2026-06-29
 - [ ] Word 分析报告 `analysis_docx.py` 集成到 app.py
 - [ ] 自定义模板上传解析 `template_engine.parse_custom_template()`
 - [ ] 审计日志 `data/logs/`
