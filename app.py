@@ -10,6 +10,7 @@ import json
 import glob
 import pandas as pd
 from datetime import datetime
+from generate_analysis_docx import generate_analysis_report
 
 # ---- Page config ----
 st.set_page_config(
@@ -40,6 +41,13 @@ DEFAULTS = {
     'generated_pl_path': None,
     'generated_bs_path': None,
     'generated_cf_path': None,
+    'generated_docx_path': None,
+    'last_pl': None,
+    'last_bs': None,
+    'last_cf': None,
+    'last_opening_bs': None,
+    'last_period_label': None,
+    'last_bs_date': None,
 }
 for key, val in DEFAULTS.items():
     if key not in st.session_state:
@@ -718,6 +726,14 @@ elif st.session_state.page == '报表生成':
                 cf_renderer.render(full_name, period_label, cf_map, cf_path)
                 st.session_state.generated_cf_path = cf_path
 
+                # Save results for analysis report
+                st.session_state.last_pl = pl
+                st.session_state.last_bs = bs
+                st.session_state.last_cf = cf
+                st.session_state.last_opening_bs = opening_bs
+                st.session_state.last_period_label = period_label
+                st.session_state.last_bs_date = bs_date
+
                 st.success(f'✅ 报表已生成！')
                 st.info(f'利润表: {pl_path}\n资产负债表: {bs_path}')
 
@@ -774,7 +790,43 @@ elif st.session_state.page == '分析导出':
 
         st.divider()
         st.subheader('📝 分析报告')
-        st.caption('Word格式分析报告将在后续版本中提供。')
+
+        col_r1, col_r2 = st.columns([1, 2])
+        with col_r1:
+            if st.session_state.last_pl and st.session_state.last_bs and st.session_state.last_cf:
+                if st.button('📄 生成分析报告（Word）', type='primary', use_container_width=True):
+                    company = st.session_state.current_company
+                    output_dir = os.path.join(OUTPUT_DIR, company)
+                    os.makedirs(output_dir, exist_ok=True)
+                    full_name = config.get('full_name', company)
+                    period_label = st.session_state.last_period_label
+                    bs_date = st.session_state.last_bs_date
+
+                    docx_path = os.path.join(
+                        output_dir, f'{company}_{period_label}_财务分析报告.docx')
+
+                    with st.spinner('正在生成分析报告...'):
+                        generate_analysis_report(
+                            full_name, period_label, bs_date,
+                            st.session_state.last_pl,
+                            st.session_state.last_bs,
+                            st.session_state.last_cf,
+                            st.session_state.last_opening_bs,
+                            docx_path)
+                    st.session_state.generated_docx_path = docx_path
+                    st.success('✅ 分析报告已生成！')
+
+                if st.session_state.generated_docx_path and \
+                   os.path.exists(st.session_state.generated_docx_path):
+                    with open(st.session_state.generated_docx_path, 'rb') as f:
+                        st.download_button(
+                            '📥 下载分析报告', f.read(),
+                            os.path.basename(st.session_state.generated_docx_path),
+                            mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                            use_container_width=True)
+            else:
+                st.button('📄 生成分析报告（需先生成报表）', disabled=True, use_container_width=True)
+                st.caption('请先在「报表生成」页面生成三大报表。')
 
         if st.session_state.generated_pl_path:
             st.info('✅ 报表已生成，可使用上方按钮下载。')
