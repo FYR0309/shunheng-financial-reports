@@ -1,14 +1,21 @@
-# Temp files
-~$*
-*.tmp
-__pycache__/
-
-# Intermediate data
-_calc_data.json
-
-# Raw source data (large files)
+# 源数据文件 — 敏感信息，不上传
 顺恒2026年1-5月销售收入数据.xlsx
 顺恒2026年1-5月成本费用数据.xlsx
 顺恒2026年*月农行明细.xls
 顺恒2026年*月农村信用社明细.xls
 顺恒2026年*月工资薪金.xlsx
+
+# Python
+__pycache__/
+*.pyc
+
+# Temp files
+~$*
+*.tmp
+
+# Intermediate data
+_calc_data.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
