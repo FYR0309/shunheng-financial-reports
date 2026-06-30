@@ -1,0 +1,18 @@
+[server]
+# 云端部署模式
+headless = true
+# 允许的最大上传文件大小 (MB)
+maxUploadSize = 50
+# 禁用文件监视器（云端不需要热重载）
+runOnSave = false
+
+[theme]
+# 稳重专业的配色
+primaryColor = "#1E6F5C"
+backgroundColor = "#FAFBFC"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans-serif"
+
+[browser]
+gatherUsageStats = false

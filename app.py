@@ -67,6 +67,18 @@ for key, val in DEFAULTS.items():
         st.session_state[key] = val
 
 # ---- 初始化默认公司配置 ----
+# 默认期初余额结构（按小企业会计准则资产负债表行次）
+_DEFAULT_OPENING_BS = {
+    '货币资金': 0, '应收账款': 0, '预付账款': 0, '其他应收款': 0,
+    '存货': 0, '流动资产合计': 0,
+    '固定资产原价': 0, '减：累计折旧': 0, '固定资产账面价值': 0,
+    '长期待摊费用': 0, '非流动资产合计': 0, '资产总计': 0,
+    '应付账款': 0, '预收账款': 0, '应付职工薪酬': 0,
+    '应交税费': 0, '其他应付款': 0, '流动负债合计': 0, '负债合计': 0,
+    '实收资本（或股本）': 0, '未分配利润': 0, '所有者权益（或股东权益）合计': 0,
+    '负债和所有者权益（或股东权益）总计': 0,
+}
+
 def _ensure_company_config(company_name):
     """确保公司目录和 config.json 存在，不存在则自动创建。"""
     company_dir = get_company_dir(company_name)
@@ -75,10 +87,11 @@ def _ensure_company_config(company_name):
     if not os.path.exists(config_path):
         default_config = {
             'full_name': company_name,
-            'opening_bs': {}
+            'opening_bs': dict(_DEFAULT_OPENING_BS),
         }
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(default_config, f, ensure_ascii=False, indent=2)
+    return load_company_config(company_name)
 
 # ---- Helpers ----
 def get_company_dir(name):
@@ -89,7 +102,7 @@ def load_company_config(name):
     if os.path.exists(path):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return {}
+    return {'full_name': name, 'opening_bs': dict(_DEFAULT_OPENING_BS)}
 
 # 初始化默认公司
 _ensure_company_config(DEFAULT_COMPANY)
