@@ -201,7 +201,12 @@ def fill_custom_template(template_path, field_map, data_map, output_path,
         if c.value is None or str(c.value).strip() == '':
             c.value = f'期间：{period_label}'
 
-    # Fill data values
+    # Step 1: Clear ALL mapped value cells (remove residual template data)
+    for field_name, cell_info in field_map.items():
+        ws.cell(row=cell_info['row'], column=cell_info['col_cum']).value = None
+        ws.cell(row=cell_info['row'], column=cell_info['col_mon']).value = None
+
+    # Step 2: Fill data values
     for field_name, cell_info in field_map.items():
         if field_name not in data_map:
             continue

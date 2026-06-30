@@ -104,6 +104,11 @@ class CalcEngine:
                 for rec in records:
                     if rec['account_code'] in cogs_codes:
                         cogs += rec['amount']
+        else:
+            # Fallback: if no COGS mapping, use ALL cost invoices (same as revenue fallback)
+            for mo, records in invoice_data.get('costs', {}).items():
+                for rec in records:
+                    cogs += rec['amount']
 
         # --- Selling expenses ---
         selling_codes = set()

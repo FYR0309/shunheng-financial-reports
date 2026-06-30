@@ -2,101 +2,88 @@
 
 ## 项目定位
 
-把顺恒废旧公司的报表生成脚本改造为**通用本地Web应用**。财务人员通过浏览器上传发票/银行流水/工资表 → 自动生成《小企业会计准则》三大报表。
+顺恒废旧公司专用财务报表生成工具（Streamlit本地Web应用）。三步完成：上传文件 → 核对数据 → 生成4份报表。
 
 ## 核心约束
 
 - **全本地处理** — 数据不上传任何服务器，不发网络请求
-- **Streamlit 框架** — 单页应用，侧边栏导航
-- **小企业会计准则** — 预置标准模板，用户可配科目映射
+- **Streamlit 框架** — 3页极简界面（上传/核对/生成）
+- **小企业会计准则** — 自定义模板驱动，保留原始格式
+- **单一公司** — 顺恒废旧公司，不做多公司管理
 
 ## 当前进度
 
-**MVP（第一期）已完成** — 2026-06-29
+**V3简化版已完成** — 2026-06-30
 
 | 模块 | 文件 | 状态 |
 |------|------|------|
-| 模板引擎 | `template_engine.py` | ✅ 预置三表JSON配置 |
+| Web界面 | `app.py` (~586行) | ✅ 3页：上传→核对→生成 |
+| 计算引擎 | `calc_engine.py` | ✅ PL + BS + CF |
+| 科目余额表 | `trial_balance.py` | ✅ 发票科目汇总 |
 | 数据抽取器 | `data_extractor.py` | ✅ 发票/银行/工资 |
-| 科目映射器 | `mapping_engine.py` | ✅ 三种规则类型 |
-| 计算引擎 | `calc_engine.py` | ✅ PL + BS + CF 计算 |
-| 格式渲染器 | `format_renderer.py` | ✅ 宋体/Arial，完整边框 |
-| 验证器 | `validator.py` | ✅ 三层检查 |
-| Web界面 | `app.py` | ✅ 7个页面全部实现，三大报表均可生成下载 |
+| 模板引擎 | `template_engine.py` | ✅ 自定义模板解析+填充 |
+| 智能导入 | `smart_import.py` | ✅ 内容+文件名兜底识别 |
+| 科目映射器 | `mapping_engine.py` | ✅ code_match规则 |
 
-## 待开发（第二期）
+## 输出报表
 
-- [x] 现金流量表（间接法）完整生成 `calc_engine.calculate_cf()` ✅ 2026-06-29
-- [x] Word 分析报告 `generate_analysis_docx.py` 集成到 app.py ✅ 2026-06-29
-- [x] 自定义模板上传解析 `template_engine.parse_custom_template()` ✅ 2026-06-29
-- [x] 多期历史对比 ✅ 2026-06-29 (替代审计日志)
-- [x] 多月份批量生成 ✅ 2026-06-29
+1. 利润表 (利润表_2026年X月.xlsx)
+2. 资产负债表 (资产负债表_2026年X月X日.xlsx)
+3. 现金流量表 (现金流量表_2026年X月.xlsx)
+4. 科目余额表 (科目余额表_2026年X月.xlsx)
 
 ## 关键数字（顺恒已验证）
 
-- Revenue 4,080,824.78 / COGS 2,466,533.98 / Net Profit 334,852.98
-- Total Assets 4,378,328.56 / A-L-E = 0.00
-- Monthly depreciation 25,886.46 / Monthly LTD amort 180.00
-- Bank fee 4.50/month / Social insurance 25% of gross payroll
+- Revenue 4,080,824.78 / COGS 2,466,533.98 / Net Profit 513,057.33
+- Total Assets 4,391,280.16
+- Sales month 1: ¥570,877.22 / Costs month 1: ¥444,927.61
 
 ## 关键文件
 
 | 文件 | 用途 |
 |------|------|
-| `app.py` | Streamlit 入口，启动方式：`streamlit run app.py` 或双击 `启动报表工具.bat` |
-| `generate_formatted.py` | 原始顺恒专用脚本（保留参考，不再开发） |
-| `templates/*.json` | 预置报表模板配置（PL/BS/CF） |
-| `data/` | 运行时目录（公司档案、上传、输出、日志） |
-| `docs/superpowers/specs/2026-06-29-financial-report-tool-design.md` | 设计文档 |
-| `docs/superpowers/plans/2026-06-29-financial-report-tool-mvp.md` | 实施计划 |
-| `.gitignore` | 已排除源数据文件（*.xlsx/*.xls）和data/companies/ |
-| `requirements.txt` | Python依赖 |
+| `app.py` | Streamlit 入口，启动方式：`streamlit run app.py` |
+| `trial_balance.py` | 科目余额表生成（原名balance_sheet.py，因pyc缓存问题重命名） |
+| `calc_engine.py` | 三大报表计算引擎 |
+| `template_engine.py` | 模板解析（parse_custom_template）+ 填充（fill_custom_template） |
+| `data_extractor.py` | 发票/银行/工资数据抽取 |
+| `smart_import.py` | 文件类型智能识别（内容检测+文件名兜底） |
+| `mapping_engine.py` | 科目映射管理 |
+| `data/companies/顺恒废旧公司/config.json` | 公司配置 |
+| `data/companies/顺恒废旧公司/mappings.json` | 科目映射（9个营业收入编码+2个营业成本编码） |
+| `data/templates/顺恒废旧公司/` | 自定义模板（pl/bs/cf_custom.xlsx） |
+| `docs/superpowers/specs/2026-06-30-financial-report-tool-v3-simplification-design.md` | V3设计文档 |
 
 ## 技术细节
 
 ### 数据流
 ```
-源文件(.xlsx/.xls) → data_extractor → {标准化dict}
-                                    → calc_engine → {计算结果}
-                                    → format_renderer → .xlsx输出
+源文件(.xlsx/.xls) → smart_import.classify_file() 识别类型
+                   → data_extractor 提取数据
+                   → calc_engine 计算三大报表
+                   → template_engine 填充模板
+                   → trial_balance 生成科目余额表
+                   → 下载 .xlsx 报表
 ```
 
-### 科目映射三种规则
-1. `code_match` — 源数据科目编码 → 报表行
-2. `auto_calc` — 计算引擎产出（折旧、税金附加）
-3. `multi_source` — 多来源汇总（管理费用 = 发票 + 工资 + 社保 + 折旧）
+### 文件名兜底识别
+当 classify_file() 返回 unknown 时（Streamlit 进程中偶发），用文件名关键词检测：
+- 销售/sales/收入 → sales_invoice
+- 成本/cost/费用/采购 → cost_invoice
+- 农行/nong → bank_nong
+- 信用/信用社/xin → bank_xin
+- 工资/payroll/薪金 → payroll
 
-### 资产负债表其他应付款
-倒挤（plug figure）: 其他应付款 = 资产总计 - 所有已知负债 - 所有者权益
-标注为"待确认"，用户可手动覆盖。
+### COGS映射
+2个税收分类编码：`1110701000000000000`, `1110799000000000000`
 
-### 银行流水格式
-- 农行：正序，col 0=日期 1=收入 2=支出 3=余额 7=摘要，数据从第3行
-- 信用社：倒序，col 0=日期 1=支出 2=收入 3=余额，数据从第4行
-
-### 发票格式（金蝶导出）
-- Sheet名: "信息汇总表"
-- col 8=日期, 9=科目编码, 11=货品名称, 16=金额, 18=税额
+### 已知问题
+- Streamlit模块重载可能导致.pyc缓存不一致，重命名模块可彻底解决
+- classify_file() 在Streamlit中可能返回 unknown，已通过文件名兜底修复
 
 ## 启动命令
 
 ```bash
-# 安装依赖
 pip install -r requirements.txt
-
-# 启动应用
 streamlit run app.py
-
-# 或双击 Windows 用户
-启动报表工具.bat
-```
-
-## 测试验证
-
-```bash
-# 运行生成好的顺恒数据验证
-python self_check.py
-
-# 生成原始报表
-python generate_formatted.py
 ```

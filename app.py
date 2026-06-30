@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
-"""财务报表生成工具 — Streamlit Web Application.
+"""财务报表生成工具 — 三步生成三大报表 + 科目余额表.
 
-Local web app for generating 小企业会计准则 financial statements.
-All data stays on the user's computer. No network requests.
+① 上传文件 → ② 核对数据 → ③ 生成报表
 """
 import streamlit as st
-import os
-import json
-import glob
-import pandas as pd
+import os, json, shutil
 from datetime import datetime
-from generate_analysis_docx import generate_analysis_report
+from collections import defaultdict
 
 # ---- Page config ----
 st.set_page_config(
@@ -26,40 +22,34 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 COMPANIES_DIR = os.path.join(DATA_DIR, 'companies')
 UPLOADS_DIR = os.path.join(DATA_DIR, 'uploads')
 OUTPUT_DIR = os.path.join(DATA_DIR, 'output')
-LOGS_DIR = os.path.join(DATA_DIR, 'logs')
+TEMPLATES_DIR = os.path.join(DATA_DIR, 'templates')
 
-for d in [COMPANIES_DIR, UPLOADS_DIR, OUTPUT_DIR, LOGS_DIR]:
+for d in [COMPANIES_DIR, UPLOADS_DIR, OUTPUT_DIR]:
     os.makedirs(d, exist_ok=True)
+
+# ---- Default company ----
+DEFAULT_COMPANY = '顺恒废旧公司'
 
 # ---- Session state ----
 DEFAULTS = {
-    'current_company': None,
+    'current_company': DEFAULT_COMPANY,
     'current_year': 2026,
     'current_month': 5,
-    'page': '首页',
-    'data_verified': False,
-    'generated_pl_path': None,
-    'generated_bs_path': None,
-    'generated_cf_path': None,
-    'generated_docx_path': None,
-    'last_pl': None,
-    'last_bs': None,
-    'last_cf': None,
-    'last_opening_bs': None,
-    'last_period_label': None,
-    'last_bs_date': None,
+    '_last_year': None,         # track changes to invalidate cache
+    '_last_month': None,
+    'page': 'upload',
+    'uploaded_files': {},       # {file_type: (filepath, filename)}
+    'classified_files': [],     # [(filename, file_type), ...]
+    'unknown_files': [],        # [filename, ...]
+    'extracted_data': None,     # cached extraction result
+    'generated_reports': {},    # {type: filepath}
 }
 for key, val in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# ---- Helpers ----
-def get_company_list():
-    if not os.path.exists(COMPANIES_DIR):
-        return []
-    return sorted([d for d in os.listdir(COMPANIES_DIR)
-                   if os.path.isdir(os.path.join(COMPANIES_DIR, d))])
 
+# ---- Helpers ----
 def get_company_dir(name):
     return os.path.join(COMPANIES_DIR, name)
 
@@ -70,1336 +60,623 @@ def load_company_config(name):
             return json.load(f)
     return {}
 
-def save_company_config(name, config):
-    d = get_company_dir(name)
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, 'config.json'), 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+def get_upload_dir(company, year, month):
+    return os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
 
-def switch_page(name):
-    st.session_state.page = name
+def get_template_dir(company):
+    return os.path.join(TEMPLATES_DIR, company)
+
+
+def load_period_bank_payroll(company, year, months):
+    """Scan multiple months' upload dirs for bank/payroll data.
+
+    Returns:
+        bank_data: {month: {'农行': data, '信用社': data}, ...}
+        payroll_data: {month: {gross_pay, ...}, ...}
+    """
+    from data_extractor import BankExtractor, PayrollExtractor
+
+    bank_data = {}
+    payroll_data = {}
+
+    for mo in months:
+        upload_dir = get_upload_dir(company, year, mo)
+        if not os.path.exists(upload_dir):
+            continue
+
+        for fname in os.listdir(upload_dir):
+            fpath = os.path.join(upload_dir, fname)
+            fn_lower = fname.lower()
+            if '农行' in fname or 'nong' in fn_lower:
+                try:
+                    ext = BankExtractor(fpath, 'nonghang')
+                    bank_data.setdefault(mo, {})['农行'] = ext.extract()
+                except Exception:
+                    pass
+            elif '信用' in fname or 'xin' in fn_lower:
+                try:
+                    ext = BankExtractor(fpath, 'xinyongshe')
+                    bank_data.setdefault(mo, {})['信用社'] = ext.extract()
+                except Exception:
+                    pass
+            elif '工资' in fname or 'payroll' in fn_lower or '薪金' in fname:
+                try:
+                    ext = PayrollExtractor(fpath)
+                    payroll_data[mo] = ext.extract()
+                except Exception:
+                    pass
+
+    return bank_data, payroll_data
+
 
 # ---- Sidebar ----
 with st.sidebar:
     st.title('📊 财务报表工具')
 
-    companies = get_company_list()
-    company_options = ['— 选择公司 —'] + companies
-    current_idx = 0
-    if st.session_state.current_company and st.session_state.current_company in companies:
-        current_idx = companies.index(st.session_state.current_company) + 1
+    # Company (fixed display, no switching needed for V3)
+    company = st.session_state.current_company
+    config = load_company_config(company)
+    st.caption(f'公司：{config.get("full_name", company)}')
 
-    selected_company = st.selectbox('当前公司', company_options, index=current_idx)
-    if selected_company != '— 选择公司 —':
-        st.session_state.current_company = selected_company
-
+    # Year / Month
     c1, c2 = st.columns(2)
     with c1:
         years = list(range(2023, 2031))
         st.session_state.current_year = st.selectbox(
-            '年份', years, index=years.index(st.session_state.current_year))
+            '年份', years, index=years.index(st.session_state.current_year),
+            label_visibility='collapsed')
     with c2:
         st.session_state.current_month = st.selectbox(
-            '月份', list(range(1, 13)), index=st.session_state.current_month - 1)
+            '月份', list(range(1, 13)), index=st.session_state.current_month - 1,
+            label_visibility='collapsed')
 
     st.divider()
 
-    pages = ['首页', '公司档案', '科目映射', '数据导入', '数据核验', '报表生成', '分析导出', '历史对比', '使用教程']
-    selected = st.radio('导航', pages, index=pages.index(st.session_state.page))
-    st.session_state.page = selected
+    # 3-step navigation
+    pages = {
+        'upload': '① 上传文件',
+        'review': '② 核对数据',
+        'generate': '③ 生成报表',
+    }
+    page_keys = list(pages.keys())
+    current_idx = page_keys.index(st.session_state.page) if st.session_state.page in page_keys else 0
+    selected_label = st.radio(
+        '导航',
+        list(pages.values()),
+        index=current_idx,
+    )
+    # Map label back to key
+    label_to_key = {v: k for k, v in pages.items()}
+    st.session_state.page = label_to_key[selected_label]
 
     st.divider()
-    st.caption('所有数据仅在本地处理\n不上传任何服务器')
+    st.caption(f'数据：{DATA_DIR}')
 
-# ---- Import backend modules ----
+# Invalidate cache when month/year changes
+if (st.session_state._last_year != st.session_state.current_year or
+        st.session_state._last_month != st.session_state.current_month):
+    st.session_state.extracted_data = None
+    st.session_state.generated_reports = {}
+    st.session_state._last_year = st.session_state.current_year
+    st.session_state._last_month = st.session_state.current_month
+
+
+# ---- Import backend modules (lazy) ----
+from smart_import import classify_file
 from mapping_engine import MappingEngine
 from data_extractor import InvoiceExtractor, BankExtractor, PayrollExtractor
 from calc_engine import CalcEngine
-from format_renderer import ReportRenderer
-from validator import validate_import, validate_extraction, validate_balance, format_validation_message
-from template_engine import (
-    parse_custom_template,
-    fill_custom_template,
-    save_custom_config,
-    load_custom_config,
-)
-import template_engine as te
+from template_engine import parse_custom_template, fill_custom_template
+from trial_balance import generate_trial_balance
+
 
 # ================================================================
-# PAGE: 首页
+# ① UPLOAD PAGE
 # ================================================================
-if st.session_state.page == '首页':
-    st.header('🏠 首页')
+if st.session_state.page == 'upload':
+    st.header('① 上传文件')
 
-    if not st.session_state.current_company:
-        st.info('👈 请先在左侧选择公司，或去「公司档案」创建新公司')
-    else:
-        company = st.session_state.current_company
-        config = load_company_config(company)
-        st.subheader(f'当前公司：{company}')
-        if config.get('full_name'):
-            st.caption(f"全称：{config['full_name']}")
+    year = st.session_state.current_year
+    month = st.session_state.current_month
+    upload_dir = get_upload_dir(company, year, month)
+    period_label = f'{year}年{month}月'
 
+    st.subheader(f'📤 {period_label} 数据文件')
+
+    # Batch upload
+    st.markdown('**把本月所有文件一起拖入（可 Ctrl+多选），系统自动识别类型。**')
+    uploaded = st.file_uploader(
+        '拖拽或点击选择文件',
+        type=['xlsx', 'xls'],
+        accept_multiple_files=True,
+        key='batch_upload',
+        label_visibility='collapsed',
+    )
+
+    if uploaded:
+        # Save and classify each file
+        os.makedirs(upload_dir, exist_ok=True)
+        classified = []
+        unknown = []
+
+        for f in uploaded:
+            # Save
+            filepath = os.path.join(upload_dir, f.name)
+            with open(filepath, 'wb') as out:
+                out.write(f.getbuffer())
+
+            # Classify
+            ftype = classify_file(filepath)
+            # Fallback: filename-based detection
+            if ftype == 'unknown':
+                fn_lower = f.name.lower()
+                if '销售' in f.name or 'sales' in fn_lower or '收入' in f.name:
+                    ftype = 'sales_invoice'
+                elif '成本' in f.name or 'cost' in fn_lower or '费用' in f.name or '采购' in f.name:
+                    ftype = 'cost_invoice'
+                elif '农行' in f.name or 'nong' in fn_lower:
+                    ftype = 'bank_nong'
+                elif '信用' in f.name or 'xin' in fn_lower:
+                    ftype = 'bank_xin'
+                elif '工资' in f.name or 'payroll' in fn_lower or '薪金' in f.name:
+                    ftype = 'payroll'
+            classified.append((f.name, ftype))
+            if ftype == 'unknown':
+                unknown.append(f.name)
+
+        st.session_state.classified_files = classified
+        st.session_state.unknown_files = unknown
+
+        # Show results
         st.divider()
+        st.subheader('识别结果')
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button('📤 导入数据', use_container_width=True, type='primary'):
-                switch_page('数据导入')
-                st.rerun()
-        with col2:
-            if st.button('📊 生成报表', use_container_width=True):
-                if st.session_state.data_verified:
-                    switch_page('报表生成')
-                    st.rerun()
-                else:
-                    st.warning('请先导入并核验数据')
-        with col3:
-            if st.button('📝 导出报告', use_container_width=True):
-                switch_page('分析导出')
-                st.rerun()
+        type_labels = {
+            'sales_invoice': '📈 销售发票',
+            'cost_invoice': '📉 成本发票',
+            'bank_nong': '🏦 农行流水',
+            'bank_xin': '🏛️ 信用社流水',
+            'payroll': '👥 工资表',
+            'balance_sheet': '📋 报表文件（参考）',
+            'unknown': '⚠️ 未识别',
+        }
 
-        st.divider()
-        st.subheader('历史报表')
-        output_company_dir = os.path.join(OUTPUT_DIR, company)
-        if os.path.exists(output_company_dir):
-            past_files = sorted(
-                [f for f in os.listdir(output_company_dir) if f.endswith('.xlsx')],
-                reverse=True)[:12]
-            if past_files:
-                for f in past_files:
-                    st.write(f'✅ {f}')
+        for fname, ftype in classified:
+            label = type_labels.get(ftype, f'❓ {ftype}')
+            if ftype == 'unknown':
+                st.error(f'{label} — {fname}')
+            elif ftype == 'balance_sheet':
+                st.info(f'{label} — {fname}')
             else:
-                st.caption('暂无历史报表')
-        else:
-            st.caption('暂无历史报表')
+                st.success(f'{label} — {fname}')
+
+        if unknown:
+            st.warning(f'⚠️ {len(unknown)} 个文件未能识别，请检查文件格式。')
+
+        if not unknown:
+            st.success('✅ 所有文件已识别，可以进入下一步了！')
+
+    # Show existing files if any
+    if os.path.exists(upload_dir):
+        existing = os.listdir(upload_dir)
+        if existing and not uploaded:
+            st.info(f'📁 本月已上传 {len(existing)} 个文件')
+
+    # Navigation
+    st.divider()
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        if st.button('进入核对 →', type='primary', use_container_width=True):
+            st.session_state.extracted_data = None  # force re-extraction
+            st.session_state.generated_reports = {}
+            st.session_state.page = 'review'
+            st.rerun()
+
 
 # ================================================================
-# PAGE: 公司档案
+# ② REVIEW PAGE
 # ================================================================
-elif st.session_state.page == '公司档案':
-    st.header('📋 公司档案')
+if st.session_state.page == 'review':
+    st.header('② 核对数据')
 
-    tab1, tab2 = st.tabs(['公司信息', '年初余额'])
+    year = st.session_state.current_year
+    month = st.session_state.current_month
+    upload_dir = get_upload_dir(company, year, month)
 
-    with tab1:
-        action = st.radio('操作', ['选择已有公司', '创建新公司'], horizontal=True)
-
-        if action == '创建新公司':
-            new_name = st.text_input('公司简称（用于文件夹命名）', placeholder='例如：顺恒废旧')
-            full_name = st.text_input('公司全称（将显示在报表上）',
-                                      placeholder='例如：来宾市顺恒废旧汽车回收有限公司')
-            tax_id = st.text_input('纳税人识别号', placeholder='可选')
-
-            if st.button('创建公司', type='primary'):
-                if new_name:
-                    config = {
-                        'full_name': full_name,
-                        'tax_id': tax_id,
-                        'created_at': datetime.now().isoformat(),
-                        'template_type': 'preset',
-                        'opening_bs': {},
-                    }
-                    save_company_config(new_name, config)
-                    st.session_state.current_company = new_name
-                    st.success(f'公司「{new_name}」创建成功！')
-                    st.rerun()
-                else:
-                    st.error('请输入公司简称')
-        else:
-            companies = get_company_list()
-            if companies:
-                idx = companies.index(st.session_state.current_company) if \
-                    st.session_state.current_company in companies else 0
-                sel = st.selectbox('选择公司', companies, index=idx)
-                if sel:
-                    st.session_state.current_company = sel
-                    config = load_company_config(sel)
-                    st.write(f"全称：{config.get('full_name', '未设置')}")
-            else:
-                st.info('暂无公司档案，请先创建')
-
-    with tab2:
-        if not st.session_state.current_company:
-            st.info('请先选择或创建公司')
-        else:
-            company = st.session_state.current_company
-            config = load_company_config(company)
-            opening = config.get('opening_bs', {})
-
-            st.subheader('年初资产负债表余额')
-            st.caption('填写去年12月31日的资产负债表期末数。填一次即可。')
-
-            # Smart import: upload balance sheet xlsx
-            with st.expander('📤 上传去年资产负债表自动填写', expanded=not opening):
-                bs_file = st.file_uploader('上传资产负债表 (.xlsx)', type=['xlsx'],
-                    key='bs_upload', help='上传去年12月的资产负债表，系统自动识别科目并填入')
-                if bs_file:
-                    import tempfile
-                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
-                    tmp.write(bs_file.read()); tmp.close()
-                    try:
-                        from smart_import import parse_opening_balance, match_bs_to_config
-                        bs_items, errs = parse_opening_balance(tmp.name)
-                        if bs_items:
-                            wanted = ['货币资金','应收账款','预付账款','其他应收款','存货',
-                                      '流动资产合计','固定资产原价','减：累计折旧','固定资产账面价值',
-                                      '长期待摊费用','非流动资产合计','资产总计',
-                                      '短期借款','应付账款','预收账款','应付职工薪酬','应交税费',
-                                      '其他应付款','流动负债合计','负债合计',
-                                      '实收资本（或股本）','未分配利润','所有者权益（或股东权益）合计',
-                                      '负债和所有者权益（或股东权益）总计']
-                            matched, unmatched = match_bs_to_config(bs_items, wanted)
-                            if matched:
-                                for field, val in matched.items():
-                                    opening[field] = val
-                                st.success(f'✅ 已自动填入 {len(matched)} 项')
-                                if unmatched:
-                                    st.caption(f'未识别: {len(unmatched)} 项 ({", ".join(n for n,v in unmatched[:5])}...)')
-                            else:
-                                st.warning('未能匹配任何科目，请检查文件是否为标准资产负债表格式')
-                        else:
-                            st.warning('未能解析出科目数据，请手动填写')
-                    except Exception as e:
-                        st.error(f'解析失败: {e}')
-                    finally:
-                        os.unlink(tmp.name)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown('**资产**')
-                opening['货币资金'] = st.number_input('货币资金', value=float(opening.get('货币资金', 0)), step=1000.0, format='%.2f', key='bs_cash')
-                opening['应收账款'] = st.number_input('应收账款', value=float(opening.get('应收账款', 0)), step=1000.0, format='%.2f', key='bs_ar')
-                opening['预付账款'] = st.number_input('预付账款', value=float(opening.get('预付账款', 0)), step=1000.0, format='%.2f', key='bs_prepay')
-                opening['其他应收款'] = st.number_input('其他应收款', value=float(opening.get('其他应收款', 0)), step=1000.0, format='%.2f', key='bs_orecv')
-                opening['存货'] = st.number_input('存货', value=float(opening.get('存货', 0)), step=1000.0, format='%.2f', key='bs_inv')
-                opening['固定资产原价'] = st.number_input('固定资产原价', value=float(opening.get('固定资产原价', 0)), step=10000.0, format='%.2f', key='bs_fa')
-                opening['减：累计折旧'] = st.number_input('减：累计折旧', value=float(opening.get('减：累计折旧', 0)), step=1000.0, format='%.2f', key='bs_depr')
-                opening['长期待摊费用'] = st.number_input('长期待摊费用', value=float(opening.get('长期待摊费用', 0)), step=1000.0, format='%.2f', key='bs_ltd')
-
-            with col2:
-                st.markdown('**负债及所有者权益**')
-                opening['应付账款'] = st.number_input('应付账款', value=float(opening.get('应付账款', 0)), step=1000.0, format='%.2f', key='bs_ap')
-                opening['预收账款'] = st.number_input('预收账款', value=float(opening.get('预收账款', 0)), step=1000.0, format='%.2f', key='bs_pr')
-                opening['应付职工薪酬'] = st.number_input('应付职工薪酬', value=float(opening.get('应付职工薪酬', 0)), step=1000.0, format='%.2f', key='bs_payable')
-                opening['应交税费'] = st.number_input('应交税费', value=float(opening.get('应交税费', 0)), step=1000.0, format='%.2f', key='bs_tax')
-                opening['其他应付款'] = st.number_input('其他应付款', value=float(opening.get('其他应付款', 0)), step=10000.0, format='%.2f', key='bs_other')
-                opening['实收资本（或股本）'] = st.number_input('实收资本（或股本）', value=float(opening.get('实收资本（或股本）', 550000)), step=10000.0, format='%.2f', key='bs_capital')
-                opening['未分配利润'] = st.number_input('未分配利润', value=float(opening.get('未分配利润', 0)), step=10000.0, format='%.2f', key='bs_undist')
-
-            if st.button('保存年初余额', type='primary'):
-                config['opening_bs'] = opening
-                save_company_config(company, config)
-                st.success('年初余额已保存！')
-
-# ================================================================
-# PAGE: 科目映射
-# ================================================================
-elif st.session_state.page == '科目映射':
-    st.header('⚙️ 科目映射')
-
-    if not st.session_state.current_company:
-        st.info('请先选择公司')
-    else:
-        company = st.session_state.current_company
-        company_dir = get_company_dir(company)
-        engine = MappingEngine(company_dir)
-
-        statement = st.selectbox('选择报表', ['利润表 (pl)', '资产负债表 (bs)'])
-        st_type = 'pl' if '利润' in statement else 'bs'
-
-        # Show current mappings
-        current = engine.get_mappings(st_type)
-        if current:
-            st.subheader('当前映射')
-            for m in current:
-                codes = ', '.join(m.get('account_codes', []))
-                rtype = m['rule_type']
-                st.write(f"- **{m['report_line']}** ← `{codes}` ({rtype})")
-
-        st.divider()
-
-        # Add manual mapping
-        st.subheader('手动添加映射')
-        cfg = te.load_preset(st_type)
-        if st_type == 'bs':
-            item_names = sorted(set(
-                [it['left'] for it in cfg['items'] if it['left']] +
-                [it['right'] for it in cfg['items'] if it['right']]
-            ))
-        else:
-            item_names = sorted(set(it['name'] for it in cfg['items'] if it['name']))
-
-        col1, col2 = st.columns(2)
-        with col1:
-            target_line = st.selectbox('报表行项目', ['— 选择 —'] + item_names, key='map_target')
-        with col2:
-            new_codes = st.text_input('科目编码（多个用逗号分隔）', placeholder='例如: 1110701000000000000, 1110799...')
-
-        if st.button('添加到映射', type='primary'):
-            if target_line != '— 选择 —' and new_codes.strip():
-                codes = [c.strip() for c in new_codes.split(',') if c.strip()]
-                engine.add_code_mapping(st_type, target_line, codes)
-                st.success(f'已添加：{target_line} ← {codes}')
-                st.rerun()
-            else:
-                st.error('请选择报表行并输入科目编码')
-
-        # Discover codes from uploaded sample
-        st.divider()
-        st.subheader('从样本文件发现科目编码')
-        st.caption('上传一份发票文件，系统会扫描所有科目编码并显示未配置的。')
-        sample_file = st.file_uploader('上传样本文件', type=['xlsx', 'xls'], key='mapping_sample')
-
-        if sample_file:
-            tmp_path = os.path.join(UPLOADS_DIR, f'_sample_{company}.xlsx')
-            with open(tmp_path, 'wb') as f:
-                f.write(sample_file.read())
-
-            try:
-                ie = InvoiceExtractor(tmp_path)
-                by_code = ie.get_total_by_code()
-                st.success(f'发现 {len(by_code)} 个科目编码')
-
-                unmapped = engine.find_unmapped_codes(st_type, list(by_code.keys()))
-                if unmapped:
-                    st.warning(f'{len(unmapped)} 个编码未配置映射：')
-                    for code in unmapped:
-                        col1, col2 = st.columns([1, 2])
-                        with col1:
-                            st.code(code)
-                        with col2:
-                            quick_target = st.selectbox(
-                                f'映射到 →', ['— 选择 —'] + item_names,
-                                key=f'quick_{code}')
-                            if quick_target != '— 选择 —':
-                                if st.button(f'确认映射', key=f'btn_{code}'):
-                                    engine.add_code_mapping(st_type, quick_target, [code])
-                                    st.rerun()
-                else:
-                    st.success('所有编码已配置映射！✅')
-            except Exception as e:
-                st.error(f'读取文件失败：{e}')
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-
-# ================================================================
-# PAGE: 数据导入
-# ================================================================
-elif st.session_state.page == '数据导入':
-    st.header('📤 数据导入')
-
-    if not st.session_state.current_company:
-        st.info('请先选择公司')
-    else:
-        company = st.session_state.current_company
-        year = st.session_state.current_year
-        month = st.session_state.current_month
-
-        st.subheader(f'导入 {year}年{month}月 数据')
-
-        # Smart batch import
-        with st.expander('🧠 智能批量导入（一键上传，自动识别）', expanded=True):
-            st.caption('一次性选择所有文件（可多选），系统自动识别文件类型并归类。')
-            batch_files = st.file_uploader(
-                '选择所有本月文件', type=['xlsx', 'xls'],
-                accept_multiple_files=True, key='batch_import',
-                help='可同时选择 发票×2 + 银行流水×2 + 工资表，一起上传'
-            )
-            if batch_files:
-                import io
-                from smart_import import classify_file
-                classified = {'sales': None, 'costs': None, 'nong': None, 'xin': None, 'payroll': None}
-                classified_bytes = {}
-                unknown = []
-                for f in batch_files:
-                    import tempfile
-                    fbytes = f.read()
-                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
-                    tmp.write(fbytes); tmp_path = tmp.name; tmp.close()
-                    ftype = classify_file(tmp_path)
-                    fname = f.name
-                    os.unlink(tmp_path)
-
-                    icon_map = {'sales_invoice': '📄', 'cost_invoice': '📄', 'bank_nong': '🏦',
-                                'bank_xin': '🏦', 'payroll': '👤', 'unknown': '❓'}
-                    label_map = {'sales_invoice': '销售收入', 'cost_invoice': '成本费用',
-                                 'bank_nong': '农行流水', 'bank_xin': '信用社流水',
-                                 'payroll': '工资表', 'unknown': '未识别'}
-
-                    if ftype == 'sales_invoice':
-                        classified['sales'] = f; classified_bytes['sales'] = fbytes
-                    elif ftype == 'cost_invoice':
-                        classified['costs'] = f; classified_bytes['costs'] = fbytes
-                    elif ftype == 'bank_nong':
-                        classified['nong'] = f; classified_bytes['nong'] = fbytes
-                    elif ftype == 'bank_xin':
-                        classified['xin'] = f; classified_bytes['xin'] = fbytes
-                    elif ftype == 'payroll':
-                        classified['payroll'] = f; classified_bytes['payroll'] = fbytes
-                    else:
-                        unknown.append(fname)
-
-                # Show classification results
-                c1, c2, c3 = st.columns(3)
-                for ci, (slot, file_obj) in enumerate([(c1, 'sales'), (c2, 'costs'), (c3, 'payroll')]):
-                    idx = ci
-                    col = [c1, c2, c3][idx]
-                    with col:
-                        f = classified[slot]
-                        if f:
-                            st.success(f'{icon_map.get(slot+"_invoice" if slot in ("sales","costs") else "bank_"+slot if slot in ("nong","xin") else slot, "")} {label_map.get(slot+"_invoice" if slot in ("sales","costs") else "bank_"+slot if slot in ("nong","xin") else slot, slot)}: {f.name}')
-                        else:
-                            st.info(f'⏳ {label_map.get(slot+"_invoice" if slot in ("sales","costs") else "bank_"+slot if slot in ("nong","xin") else slot, slot)}: 等待上传')
-
-                with st.expander('🏦 银行流水详情', expanded=False):
-                    bc1, bc2 = st.columns(2)
-                    with bc1:
-                        f = classified['nong']
-                        if f: st.success(f'🏦 农行: {f.name}')
-                        else: st.info('⏳ 农行: 等待上传')
-                    with bc2:
-                        f = classified['xin']
-                        if f: st.success(f'🏦 信用社: {f.name}')
-                        else: st.info('⏳ 信用社: 等待上传')
-
-                if unknown:
-                    st.warning(f'⚠ 未识别 {len(unknown)} 个文件: {", ".join(unknown)}')
-                    st.caption('请检查文件格式，或手动上传到下方对应位置。')
-
-                # Auto-fill individual uploaders with bytes
-                st.session_state['_batch_sales'] = classified.get('sales')
-                st.session_state['_batch_costs'] = classified.get('costs')
-                st.session_state['_batch_nong'] = classified.get('nong')
-                st.session_state['_batch_xin'] = classified.get('xin')
-                st.session_state['_batch_payroll'] = classified.get('payroll')
-                st.session_state['_batch_bytes'] = classified_bytes
-                if any(v for v in classified.values()):
-                    st.success(f'✅ 识别完成：{sum(1 for v in classified.values() if v)} 个文件已归类')
-
-        st.divider()
-        st.caption('也可以逐个手动上传：')
-        col1, col2 = st.columns(2)
-        with col1:
-            sales_file = st.file_uploader('📄 销售收入发票', type=['xlsx', 'xls'], key='sales')
-            costs_file = st.file_uploader('📄 成本费用发票', type=['xlsx', 'xls'], key='costs')
-        with col2:
-            bank_nong = st.file_uploader('🏦 农行流水 (.xls/.xlsx)', type=['xls','xlsx'], key='nong')
-            bank_xin = st.file_uploader('🏦 信用社流水 (.xls/.xlsx)', type=['xls','xlsx'], key='xin')
-            payroll_file = st.file_uploader('👤 工资薪金表', type=['xlsx', 'xls'], key='payroll')
-
-        # Merge batch-classified files with manual uploads
-        if st.session_state.get('_batch_sales'): sales_file = st.session_state['_batch_sales']
-        if st.session_state.get('_batch_costs'): costs_file = st.session_state['_batch_costs']
-        if st.session_state.get('_batch_nong'): bank_nong = st.session_state['_batch_nong']
-        if st.session_state.get('_batch_xin'): bank_xin = st.session_state['_batch_xin']
-        if st.session_state.get('_batch_payroll'): payroll_file = st.session_state['_batch_payroll']
-
-        if st.button('保存文件并进入核验 →', type='primary'):
-            if not any([sales_file, costs_file, bank_nong, bank_xin, payroll_file]):
-                st.error('请至少上传一个文件')
-            else:
-                saved = []
-                upload_dir = os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
-                os.makedirs(upload_dir, exist_ok=True)
-
-                batch_bytes = st.session_state.get('_batch_bytes', {})
-                for label, file_obj in [
-                    ('sales', sales_file), ('costs', costs_file),
-                    ('nong', bank_nong), ('xin', bank_xin), ('payroll', payroll_file)
-                ]:
-                    if file_obj:
-                        ext = file_obj.name.split('.')[-1] if hasattr(file_obj, 'name') else 'xlsx'
-                        fname = f'{label}.{ext}'
-                        content = batch_bytes.get(label) if label in batch_bytes else file_obj.read()
-                        with open(os.path.join(upload_dir, fname), 'wb') as f:
-                            f.write(content if isinstance(content, bytes) else content)
-                        saved.append(fname)
-
-                st.success(f'已保存 {len(saved)} 个文件：{", ".join(saved)}')
-                st.session_state.data_verified = False
-                switch_page('数据核验')
-                st.rerun()
-
-# ================================================================
-# PAGE: 数据核验
-# ================================================================
-elif st.session_state.page == '数据核验':
-    st.header('✅ 数据核验')
-
-    if not st.session_state.current_company:
-        st.info('请先选择公司')
-    else:
-        company = st.session_state.current_company
-        year = st.session_state.current_year
-        month = st.session_state.current_month
-        upload_dir = os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
-
-        if not os.path.exists(upload_dir) or not os.listdir(upload_dir):
-            st.warning('未找到本月上传的数据。请先到「数据导入」上传文件。')
-            if st.button('去导入数据'):
-                switch_page('数据导入')
-                st.rerun()
-        else:
-            st.subheader('📊 数据概览')
-
-            # Extract and display
-            extraction = {'sales': {}, 'costs': {}, 'bank': {}}
-            bank_end = 0.0
-
-            # Sales
-            sales_path = os.path.join(upload_dir, 'sales.xlsx')
-            if os.path.exists(sales_path):
-                ie = InvoiceExtractor(sales_path)
-                data, skipped = ie.extract()
-                extraction['sales'] = data
-                total_sales = sum(sum(r['amount'] for r in recs) for recs in data.values())
-                count = sum(len(recs) for recs in data.values())
-                st.metric('销售收入', f'¥{total_sales:,.2f}', f'{count}张发票')
-
-            # Costs
-            costs_path = os.path.join(upload_dir, 'costs.xlsx')
-            if os.path.exists(costs_path):
-                ie = InvoiceExtractor(costs_path)
-                data, skipped = ie.extract()
-                extraction['costs'] = data
-                total_costs = sum(sum(r['amount'] for r in recs) for recs in data.values())
-                count = sum(len(recs) for recs in data.values())
-                st.metric('成本费用', f'¥{total_costs:,.2f}', f'{count}张发票')
-
-            # Bank
-            c1, c2 = st.columns(2)
-            nong_result = None
-            with c1:
-                nong_path = os.path.join(upload_dir, 'nong.xls')
-                if not os.path.exists(nong_path):
-                    nong_path = os.path.join(upload_dir, 'nong.xlsx')
-                if os.path.exists(nong_path):
-                    be = BankExtractor(nong_path, BankExtractor.BANK_NONGHANG)
-                    nong_result = be.extract()
-                    extraction['bank']['农行'] = nong_result
-                    bank_end += nong_result['end_balance']
-                    st.metric('农行余额', f'¥{nong_result["end_balance"]:,.2f}')
-            with c2:
-                xin_path = os.path.join(upload_dir, 'xin.xls')
-                if not os.path.exists(xin_path):
-                    xin_path = os.path.join(upload_dir, 'xin.xlsx')
-                if os.path.exists(xin_path):
-                    be = BankExtractor(xin_path, BankExtractor.BANK_XINYONGSHE)
-                    xin_result = be.extract()
-                    extraction['bank']['信用社'] = xin_result
-                    bank_end += xin_result['end_balance']
-                    st.metric('信用社余额', f'¥{xin_result["end_balance"]:,.2f}')
-            st.metric('🏦 银行余额合计', f'¥{bank_end:,.2f}')
-
-            # Payroll
-            payroll_path = os.path.join(upload_dir, 'payroll.xlsx')
-            if os.path.exists(payroll_path):
-                pe = PayrollExtractor(payroll_path)
-                pr = pe.extract()
-                extraction['payroll'] = pr
-                st.metric('工资应发', f'¥{pr["gross_pay"]:,.2f}')
-
-            # Validation
-            st.divider()
-            st.subheader('🔍 核验结果')
-
-            company_dir = get_company_dir(company)
-            engine = MappingEngine(company_dir)
-            passed, errors, warnings = validate_extraction(extraction, engine, 'pl')
-
-            if not errors and not warnings:
-                st.success('✅ 核验通过，可以生成报表')
-                st.session_state.data_verified = True
-            else:
-                if not errors:
-                    st.success('✅ 未发现严重问题')
-                    st.session_state.data_verified = True
-                else:
-                    st.error(f'🔴 发现 {len(errors)} 个问题：')
-                    for e in errors:
-                        st.error(format_validation_message(e))
-
-                if warnings:
-                    for w in warnings:
-                        st.warning(format_validation_message(w))
-
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button('← 返回修改数据', use_container_width=True):
-                    switch_page('数据导入')
-                    st.rerun()
-            with c2:
-                if st.button('确认无误，生成报表 →', type='primary', use_container_width=True,
-                            disabled=not st.session_state.data_verified):
-                    switch_page('报表生成')
-                    st.rerun()
-
-# ================================================================
-# PAGE: 报表生成
-# ================================================================
-elif st.session_state.page == '报表生成':
-    st.header('📊 报表生成')
-
-    if not st.session_state.current_company:
-        st.info('请先选择公司')
-    elif not st.session_state.data_verified:
-        st.warning('请先完成数据核验')
-        if st.button('去核验数据'):
-            switch_page('数据核验')
+    # Check if files exist
+    if not os.path.exists(upload_dir) or not os.listdir(upload_dir):
+        st.warning('⚠️ 本月还没有上传文件，请先上传。')
+        if st.button('← 返回上传'):
+            st.session_state.page = 'upload'
             st.rerun()
     else:
-        company = st.session_state.current_company
-        year = st.session_state.current_year
-        month = st.session_state.current_month
-        company_dir = get_company_dir(company)
-        upload_dir = os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
-
-        # ---- Custom Template Upload ----
-        with st.expander('📋 自定义模板（可选）', expanded=False):
-            st.caption('上传你自己的 xlsx 报表模板，系统会自动匹配数据字段并填入。')
-            c_t1, c_t2, c_t3 = st.columns(3)
-            stypes = ['pl', 'bs', 'cf']
-            stype_labels = {'pl': '利润表', 'bs': '资产负债表', 'cf': '现金流量表'}
-
-            for idx, (col, sty) in enumerate(zip([c_t1, c_t2, c_t3], stypes)):
-                with col:
-                    uploaded = st.file_uploader(
-                        f'{stype_labels[sty]}模板', type=['xlsx', 'xls'],
-                        key=f'custom_tpl_{sty}',
-                        help=f'上传自定义{stype_labels[sty]}格式'
-                    )
-                    if uploaded:
-                        tpl_dir = os.path.join(DATA_DIR, 'templates', company)
-                        os.makedirs(tpl_dir, exist_ok=True)
-                        tpl_path = os.path.join(tpl_dir, f'{sty}_custom.xlsx')
-                        with open(tpl_path, 'wb') as f:
-                            f.write(uploaded.getbuffer())
-
-                        try:
-                            parsed = parse_custom_template(tpl_path, statement_type=sty)
-                            save_custom_config(company, sty, parsed['field_map'],
-                                               uploaded.name)
-                            matched = len(parsed['field_map'])
-                            total = matched + len(parsed['unmatched'])
-                            st.success(f'✅ 已解析: {matched}/{total} 行匹配 ({stype_labels[sty]})')
-                            if parsed['unmatched']:
-                                st.caption(f'未匹配: {len(parsed["unmatched"])} 行')
-                        except Exception as e:
-                            st.error(f'解析失败: {e}')
-
-            # Show saved custom templates
-            saved = []
-            for sty in stypes:
-                if load_custom_config(company, sty):
-                    saved.append(stype_labels[sty])
-            if saved:
-                st.info(f'已保存自定义模板: {", ".join(saved)}')
-
-        # ---- Single / Batch generation helper ----
-        def _gen_one_month(gen_year, gen_month, opening_bs_data, engine, full_name):
-            """Generate all 3 statements for a single month. Returns (pl, bs, cf, period_label)."""
-            gen_upload_dir = os.path.join(UPLOADS_DIR, company, f'{gen_year}-{gen_month:02d}')
-            period_label = f'{gen_year}年1-{gen_month}月'
-            output_dir = os.path.join(OUTPUT_DIR, company)
-            os.makedirs(output_dir, exist_ok=True)
-            tpl_base = os.path.join(DATA_DIR, 'templates', company)
-
-            # Extract
-            results = {}
-            ie = InvoiceExtractor(os.path.join(gen_upload_dir, 'sales.xlsx'))
-            results['sales'], _ = ie.extract()
-            ie2 = InvoiceExtractor(os.path.join(gen_upload_dir, 'costs.xlsx'))
-            results['costs'], _ = ie2.extract()
-            nong_f = os.path.join(gen_upload_dir, 'nong.xls')
-            if not os.path.exists(nong_f):
-                nong_f = os.path.join(gen_upload_dir, 'nong.xlsx')
-            be1 = BankExtractor(nong_f, 'nonghang')
-            xin_f = os.path.join(gen_upload_dir, 'xin.xls')
-            if not os.path.exists(xin_f):
-                xin_f = os.path.join(gen_upload_dir, 'xin.xlsx')
-            be2 = BankExtractor(xin_f, 'xinyongshe')
-            bank_data = {'农行': be1.extract(), '信用社': be2.extract()}
-            bank_end = sum(b['end_balance'] for b in bank_data.values())
-            pe = PayrollExtractor(os.path.join(gen_upload_dir, 'payroll.xlsx'))
-            payroll_data = {gen_month: pe.extract()}
-
-            # Calculate
-            calc = CalcEngine(opening_bs_data)
-            pl = calc.calculate_pl(
-                {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
-                payroll_data, engine.get_mappings('pl'), {gen_month: bank_data}, gen_month)
-            fa_add = pl['_detail']['fa_add']
-            bs = calc.calculate_bs(pl, bank_end, fa_add, gen_month)
-            cf = calc.calculate_cf(pl, bs, {gen_month: bank_data},
-                {'sales': results.get('sales', {}), 'costs': results.get('costs', {})},
-                payroll_data, fa_add, gen_month)
-
-            # Helper for render/fill
-            def _render_or_fill(stype, preset_map, stype_label):
-                custom_cfg = load_custom_config(company, stype)
-                tp = os.path.join(tpl_base, f'{stype}_custom.xlsx') if tpl_base else None
-                op = os.path.join(output_dir,
-                    f'{company}_{gen_year}年1-{gen_month}月_{stype_label}.xlsx')
-                if custom_cfg and tp and os.path.exists(tp):
-                    fill_custom_template(tp, custom_cfg['field_map'], preset_map, op,
-                        company_name=full_name, period_label=period_label)
-                else:
-                    cfg = te.load_preset(stype)
-                    r = ReportRenderer(cfg)
-                    r.render(full_name, period_label, preset_map, op)
-                return op
-
-            # PL
-            pl_map = {
-                '一、营业收入': {0: pl['revenue'], 1: pl['revenue']},
-                '减：营业成本': {0: pl['cogs'], 1: pl['cogs']},
-                '税金及附加': {0: pl['surcharges'], 1: pl['surcharges']},
-                '管理费用': {0: pl['admin_exp'], 1: pl['admin_exp']},
-                '财务费用': {0: pl['fin_exp'], 1: pl['fin_exp']},
-                '二、营业利润（亏损以"-"号填列）': {0: pl['oper_profit'], 1: pl['oper_profit']},
-                '三、利润总额（亏损总额以"-"号填列）': {0: pl['total_profit'], 1: pl['total_profit']},
-                '四、净利润（净亏损以"-"号填列）': {0: pl['net_profit'], 1: pl['net_profit']},
-            }
-            _render_or_fill('pl', pl_map, '利润表')
-
-            # BS
-            bs_map = {}
-            for name, end, beg in [
-                ('货币资金', bs.get('cash'), opening_bs_data.get('货币资金')),
-                ('应收账款', bs.get('ar'), opening_bs_data.get('应收账款')),
-                ('预付账款', bs.get('prepay'), opening_bs_data.get('预付账款')),
-                ('其他应收款', bs.get('other_recv'), opening_bs_data.get('其他应收款')),
-                ('存货', bs.get('inventory'), opening_bs_data.get('存货')),
-                ('流动资产合计', bs.get('curr_assets'), opening_bs_data.get('流动资产合计')),
-                ('固定资产原价', bs.get('fa_orig'), opening_bs_data.get('固定资产原价')),
-                ('减：累计折旧', bs.get('acc_depr'), bs.get('acc_depr_beg')),
-                ('固定资产账面价值', bs.get('fa_net'), opening_bs_data.get('固定资产账面价值')),
-                ('长期待摊费用', bs.get('ltd'), opening_bs_data.get('长期待摊费用')),
-                ('非流动资产合计', bs.get('non_curr_assets'), opening_bs_data.get('非流动资产合计')),
-                ('资产总计', bs.get('total_assets'), opening_bs_data.get('资产总计')),
-                ('应付账款', bs.get('ap'), opening_bs_data.get('应付账款')),
-                ('预收账款', bs.get('pr'), opening_bs_data.get('预收账款')),
-                ('应付职工薪酬', bs.get('payroll_payable'), opening_bs_data.get('应付职工薪酬')),
-                ('应交税费', bs.get('tax_payable'), opening_bs_data.get('应交税费')),
-                ('其他应付款', bs.get('other_pay'), opening_bs_data.get('其他应付款')),
-                ('流动负债合计', bs.get('curr_liab'), opening_bs_data.get('流动负债合计')),
-                ('负债合计', bs.get('total_liab'), opening_bs_data.get('负债合计')),
-                ('实收资本（或股本）', bs.get('capital'), opening_bs_data.get('实收资本（或股本）')),
-                ('未分配利润', bs.get('undist_profit_end'), bs.get('undist_profit_beg')),
-                ('所有者权益（或股东权益）合计', bs.get('total_equity'), opening_bs_data.get('所有者权益（或股东权益）合计')),
-                ('负债和所有者权益（或股东权益）总计', bs.get('total_le'), opening_bs_data.get('负债和所有者权益（或股东权益）总计')),
-            ]:
-                bs_map[name] = {0: end, 1: beg}
-            _render_or_fill('bs', bs_map, '资产负债表')
-
-            # CF
-            cf_items = [
-                '销售产成品、商品、提供劳务收到的现金', '收到的其他与经营活动有关的现金',
-                '购买原材料、商品、接受劳务支付的现金', '支付的职工薪酬', '支付的税费',
-                '支付的其他与经营活动有关的现金', '经营活动产生的现金流量净额',
-                '收回短期投资、长期债券投资和长期股权投资收到的现金', '取得投资收益收到的现金',
-                '处置固定资产、无形资产和其他非流动资产收回的现金净额',
-                '短期投资、长期债券投资和长期股权投资支付的现金',
-                '购建固定资产、无形资产和其他非流动资产支付的现金', '投资活动产生的现金流量净额',
-                '取得借款收到的现金', '吸收投资者投资收到的现金', '偿还借款本金支付的现金',
-                '偿还借款利息支付的现金', '分配利润支付的现金', '筹资活动产生的现金流量净额',
-                '四、现金净增加额', '加：期初现金余额', '五、期末现金余额',
-                '净利润', '加：计提的资产减值准备', '固定资产折旧', '无形资产摊销',
-                '长期待摊费用摊销', '待摊费用减少（减：增加）', '预提费用增加（减：减少）',
-                '处置固定资产、无形资产和其他非流动资产损失（减：收益）', '固定资产报废损失',
-                '财务费用', '投资损失（减：收益）', '递延税款贷项（减：借项）',
-                '存货的减少（减：增加）', '经营性应收项目的减少（减：增加）',
-                '经营性应付项目的增加（减：减少）', '其他',
-                '债务转为资本', '一年内到期的可转换公司债券', '融资租入固定资产',
-                '现金的期末余额', '减：现金的期初余额', '加：现金等价物的期末余额',
-                '减：现金等价物的期初余额', '现金及现金等价物净增加额',
-            ]
-            cf_map = {}
-            for key in cf_items:
-                val = cf.get(key)
-                if val is not None:
-                    cf_map[key] = {0: val, 1: round(val / gen_month, 2) if gen_month else None}
-            _render_or_fill('cf', cf_map, '现金流量表')
-
-            # Save summary
-            import datetime as _dt
-            summary = {
-                'generated_at': _dt.datetime.now().isoformat(),
-                'period': period_label, 'year': gen_year, 'month': gen_month,
-                'pl': {k: v for k, v in pl.items() if not k.startswith('_')},
-                'bs': {k: v for k, v in bs.items() if not k.startswith('_')},
-                'cf': {k: v for k, v in cf.items() if not k.startswith('_')},
-            }
-            summary_path = os.path.join(output_dir, f'summary_{gen_year}_{gen_month:02d}.json')
-            with open(summary_path, 'w', encoding='utf-8') as sf:
-                json.dump(summary, sf, ensure_ascii=False, indent=2)
-
-            return pl, bs, cf, period_label
-
-        # ---- Batch Generation ----
-        uploads_base = os.path.join(UPLOADS_DIR, company)
-        available_months = []
-        if os.path.exists(uploads_base):
-            for dname in sorted(os.listdir(uploads_base)):
-                dpath = os.path.join(uploads_base, dname)
-                if not os.path.isdir(dpath):
-                    continue
-                required = ['sales.xlsx', 'costs.xlsx', 'payroll.xlsx']
-                has_nong = os.path.exists(os.path.join(dpath, 'nong.xls')) or os.path.exists(os.path.join(dpath, 'nong.xlsx'))
-                has_xin = os.path.exists(os.path.join(dpath, 'xin.xls')) or os.path.exists(os.path.join(dpath, 'xin.xlsx'))
-                if not (has_nong and has_xin):
-                    continue
-                if not [f for f in required if not os.path.exists(os.path.join(dpath, f))]:
-                    available_months.append(dname)
-
-        if len(available_months) >= 2:
-            st.divider()
-            st.subheader('⚡ 批量生成')
-            batch_selected = st.multiselect(
-                '选择要批量生成的月份', available_months,
-                default=available_months[-min(6, len(available_months)):],
-                help='默认选最近6个月。可多选后一键生成。'
-            )
-            c_b1, c_b2 = st.columns([1, 2])
-            with c_b1:
-                if st.button(f'🚀 批量生成 ({len(batch_selected)} 个月)', type='primary',
-                             use_container_width=True, disabled=len(batch_selected) < 2):
-                    config = load_company_config(company)
-                    opening_bs_data = config.get('opening_bs', {})
-                    if not opening_bs_data:
-                        st.error('请先到「公司档案」页填写年初余额')
-                    else:
-                        full_name = config.get('full_name', company)
-                        engine = MappingEngine(get_company_dir(company))
-                        prog = st.progress(0)
-                        st_text = st.empty()
-                        batch_ok = 0
-                        batch_fail = 0
-                        for idx, dir_label in enumerate(batch_selected):
-                            parts = dir_label.split('-')
-                            if len(parts) != 2:
-                                continue
-                            gy = int(parts[0])
-                            gm = int(parts[1])
-                            st_text.text(f'🔄 {gy}年{gm}月 — 生成中...')
-                            try:
-                                _gen_one_month(gy, gm, opening_bs_data, engine, full_name)
-                                batch_ok += 1
-                            except Exception as e:
-                                batch_fail += 1
-                                st.warning(f'{dir_label}: {e}')
-                            prog.progress((idx + 1) / len(batch_selected))
-                        prog.empty()
-                        st_text.empty()
-                        if batch_ok > 0:
-                            st.success(f'✅ 批量完成: {batch_ok} 个月成功' +
-                                       (f', {batch_fail} 个失败' if batch_fail else ''))
-
-            with c_b2:
-                if available_months:
-                    st.caption(f'已检测到 {len(available_months)} 个月的数据: {", ".join(available_months)}')
-
-        st.divider()
-        st.subheader('📅 单月生成')
-        if st.button('🚀 生成三大报表', type='primary', use_container_width=True):
-            with st.spinner('正在生成报表...'):
+        # Extract data (cached in session state)
+        if st.session_state.extracted_data is None:
+            with st.spinner('正在提取数据...'):
+                # Load config
                 config = load_company_config(company)
                 opening_bs = config.get('opening_bs', {})
-                if not opening_bs:
-                    st.error('请先到「公司档案」页填写年初余额')
-                    st.stop()
-                full_name = config.get('full_name', company)
-                engine = MappingEngine(company_dir)
-                pl, bs, cf, period_label = _gen_one_month(year, month, opening_bs, engine, full_name)
-                bs_date = f'{year}年{month}月28日'
-                output_dir = os.path.join(OUTPUT_DIR, company)
-                pl_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_利润表.xlsx')
-                bs_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_资产负债表.xlsx')
-                cf_path = os.path.join(output_dir, f'{company}_{year}年1-{month}月_现金流量表.xlsx')
 
-                # Validate
-                v_passed, v_errors, v_warnings = validate_balance(pl, bs)
+                # Find files by type
+                all_files = os.listdir(upload_dir)
+                sales_file = None
+                costs_file = None
+                nong_file = None
+                xin_file = None
+                payroll_file = None
 
-                # Show metrics
-                st.success('报表计算完成！')
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    st.metric('营业收入', f'¥{pl["revenue"]:,.2f}' if pl['revenue'] else '¥0.00')
-                with c2:
-                    st.metric('净利润', f'¥{pl["net_profit"]:,.2f}' if pl['net_profit'] else '¥0.00')
-                with c3:
-                    st.metric('资产总计', f'¥{bs["total_assets"]:,.2f}' if bs['total_assets'] else '¥0.00')
-                with c4:
-                    st.metric('银行余额', f'¥{bs["cash"]:,.2f}' if bs.get('cash') else '¥0.00')
+                for fname in all_files:
+                    fpath = os.path.join(upload_dir, fname)
+                    # Content-based classification
+                    try:
+                        ftype = classify_file(fpath)
+                    except Exception:
+                        ftype = 'unknown'
+                    # Fallback: filename-based detection
+                    if ftype == 'unknown':
+                        fn_lower = fname.lower()
+                        if '销售' in fname or 'sales' in fn_lower or '收入' in fname:
+                            ftype = 'sales_invoice'
+                        elif '成本' in fname or 'cost' in fn_lower or '费用' in fname or '采购' in fname:
+                            ftype = 'cost_invoice'
+                        elif '农行' in fname or 'nong' in fn_lower:
+                            ftype = 'bank_nong'
+                        elif '信用' in fname or '信用社' in fname or 'xin' in fn_lower:
+                            ftype = 'bank_xin'
+                        elif '工资' in fname or 'payroll' in fn_lower or '薪金' in fname:
+                            ftype = 'payroll'
+                    if ftype == 'sales_invoice' and not sales_file:
+                        sales_file = fpath
+                    elif ftype == 'cost_invoice' and not costs_file:
+                        costs_file = fpath
+                    elif ftype == 'bank_nong' and not nong_file:
+                        nong_file = fpath
+                    elif ftype == 'bank_xin' and not xin_file:
+                        xin_file = fpath
+                    elif ftype == 'payroll' and not payroll_file:
+                        payroll_file = fpath
 
-                # Validation
-                if v_passed:
-                    st.success(f'✅ 校验通过 — 资产负债表平衡')
-                if v_errors:
-                    for e in v_errors:
-                        st.error(format_validation_message(e))
-                if v_warnings:
-                    for w in v_warnings:
-                        st.warning(format_validation_message(w))
+                # Extract
+                sales_data = {}
+                costs_data = {}
+                nong_data = None
+                xin_data = None
+                payroll_data = {}
 
-                st.session_state.generated_pl_path = pl_path
-                st.session_state.generated_bs_path = bs_path
-                st.session_state.generated_cf_path = cf_path
+                if sales_file:
+                    ext = InvoiceExtractor(sales_file)
+                    sales_data, _ = ext.extract()
+                if costs_file:
+                    ext = InvoiceExtractor(costs_file)
+                    costs_data, _ = ext.extract()
+                if nong_file:
+                    ext = BankExtractor(nong_file, 'nonghang')
+                    nong_data = ext.extract()
+                if xin_file:
+                    ext = BankExtractor(xin_file, 'xinyongshe')
+                    xin_data = ext.extract()
+                if payroll_file:
+                    ext = PayrollExtractor(payroll_file)
+                    payroll_data = {month: ext.extract()}
 
-                # Save results for analysis report
-                st.session_state.last_pl = pl
-                st.session_state.last_bs = bs
-                st.session_state.last_cf = cf
-                st.session_state.last_opening_bs = opening_bs
-                st.session_state.last_period_label = period_label
-                st.session_state.last_bs_date = bs_date
+                # How many months of data?
+                all_months = set()
+                for mo in sales_data:
+                    all_months.add(mo)
+                for mo in costs_data:
+                    all_months.add(mo)
+                num_months = max(1, len(all_months))
 
-                st.success(f'✅ 报表已生成！')
-                st.info(f'利润表: {pl_path}\n资产负债表: {bs_path}')
+                # Load mappings
+                mapping_engine = MappingEngine(get_company_dir(company))
+                pl_mappings = mapping_engine.get_mappings('pl')
 
-                # Preview PL
-                st.divider()
-                st.subheader('利润表预览')
-                df_pl = pd.read_excel(pl_path, header=None)
-                ncols_pl = min(4, df_pl.shape[1])
-                st.dataframe(df_pl.iloc[:25, :ncols_pl], use_container_width=True, height=400)
+                # Calculate
+                calc = CalcEngine(opening_bs)
+                invoice_data = {'sales': sales_data, 'costs': costs_data}
+                bank_data = {month: {}}
+                if nong_data:
+                    bank_data[month]['农行'] = nong_data
+                if xin_data:
+                    bank_data[month]['信用社'] = xin_data
 
-# ================================================================
-# PAGE: 分析导出
-# ================================================================
-elif st.session_state.page == '分析导出':
-    st.header('📝 分析导出')
+                pl = calc.calculate_pl(invoice_data, payroll_data, pl_mappings, bank_data, num_months)
 
-    if not st.session_state.current_company:
-        st.info('请先选择公司')
-    else:
-        company = st.session_state.current_company
+                bank_end = 0.0
+                if nong_data:
+                    bank_end += nong_data['end_balance']
+                if xin_data:
+                    bank_end += xin_data['end_balance']
 
-        st.subheader('下载报表文件')
-        c1, c2, c3 = st.columns(3)
+                bs = calc.calculate_bs(pl, bank_end, pl['_detail']['fa_add'], num_months)
+                cf = calc.calculate_cf(pl, bs, bank_data, invoice_data, payroll_data,
+                                       pl['_detail']['fa_add'], num_months)
 
+                # Get sales/costs totals for current month specifically
+                sales_month = sum(r['amount'] for r in sales_data.get(month, []))
+                costs_month = sum(r['amount'] for r in costs_data.get(month, []))
+                payroll_month = payroll_data.get(month, {}).get('gross_pay', 0)
+
+                st.session_state.extracted_data = {
+                    'pl': pl,
+                    'bs': bs,
+                    'cf': cf,
+                    'sales_total': sales_month,
+                    'costs_total': costs_month,
+                    'payroll_total': payroll_month,
+                    'bank_end': bank_end,
+                    'num_months': num_months,
+                    'sales_data': sales_data,
+                    'costs_data': costs_data,
+                    'payroll_data': payroll_data,
+                    'nong_data': nong_data,
+                    'xin_data': xin_data,
+                    'bank_data': bank_data,
+                    'invoice_data': invoice_data,
+                    'opening_bs': opening_bs,
+                    'pl_mappings': pl_mappings,
+                }
+
+        # Show summary cards
+        data = st.session_state.extracted_data
+        pl = data['pl']
+        bs = data['bs']
+
+        st.subheader(f'📊 {year}年{month}月 数据概览')
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            rev = data['sales_total']
+            st.metric('本月销售收入', f'¥{rev:,.2f}')
+        with col2:
+            cos = data['costs_total']
+            st.metric('本月成本费用', f'¥{cos:,.2f}')
+        with col3:
+            pay = data['payroll_total']
+            st.metric('本月工资', f'¥{pay:,.2f}')
+        with col4:
+            bal = data['bank_end']
+            st.metric('银行期末余额', f'¥{bal:,.2f}')
+
+        # Profit summary
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            v = pl.get('revenue')
+            st.metric('累计营业收入', f'¥{v:,.2f}' if v else '—')
+        with col2:
+            v = pl.get('net_profit')
+            st.metric('累计净利润', f'¥{v:,.2f}' if v else '—')
+        with col3:
+            v = bs.get('total_assets')
+            st.metric('资产总计', f'¥{v:,.2f}' if v else '—')
+
+        # Action buttons
+        st.divider()
+        c1, c2, c3 = st.columns([1, 1, 4])
         with c1:
-            if st.session_state.generated_pl_path and os.path.exists(st.session_state.generated_pl_path):
-                with open(st.session_state.generated_pl_path, 'rb') as f:
-                    st.download_button('📥 下载利润表', f.read(),
-                        os.path.basename(st.session_state.generated_pl_path),
-                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                        use_container_width=True)
-            else:
-                st.button('📥 利润表（未生成）', disabled=True, use_container_width=True)
-
+            if st.button('← 重新上传', use_container_width=True):
+                st.session_state.extracted_data = None
+                st.session_state.page = 'upload'
+                st.rerun()
         with c2:
-            if st.session_state.generated_bs_path and os.path.exists(st.session_state.generated_bs_path):
-                with open(st.session_state.generated_bs_path, 'rb') as f:
-                    st.download_button('📥 下载资产负债表', f.read(),
-                        os.path.basename(st.session_state.generated_bs_path),
-                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                        use_container_width=True)
-            else:
-                st.button('📥 资产负债表（未生成）', disabled=True, use_container_width=True)
+            if st.button('✅ 确认，生成报表', type='primary', use_container_width=True):
+                st.session_state.page = 'generate'
+                st.rerun()
 
-        with c3:
-            if st.session_state.generated_cf_path and os.path.exists(st.session_state.generated_cf_path):
-                with open(st.session_state.generated_cf_path, 'rb') as f:
-                    st.download_button('📥 下载现金流量表', f.read(),
-                        os.path.basename(st.session_state.generated_cf_path),
-                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                        use_container_width=True)
-            else:
-                st.button('📥 现金流量表（未生成）', disabled=True, use_container_width=True)
+
+# ================================================================
+# ③ GENERATE PAGE
+# ================================================================
+if st.session_state.page == 'generate':
+    st.header('③ 生成报表')
+
+    if st.session_state.extracted_data is None:
+        st.warning('⚠️ 请先完成数据核对。')
+        if st.button('← 返回核对'):
+            st.session_state.page = 'review'
+            st.rerun()
+    else:
+        data = st.session_state.extracted_data
+        year = st.session_state.current_year
+        month = st.session_state.current_month
+
+        # ---- Period selector ----
+        period_type = st.radio(
+            '📅 报表范围',
+            ['仅本月', '本年至本月', '全年'],
+            horizontal=True,
+            index=1,
+            key='_period_type',
+        )
+
+        # Invalidate cached reports when period type changes
+        last_pt = st.session_state.get('_last_period_type')
+        if last_pt is not None and last_pt != period_type:
+            st.session_state.generated_reports = {}
+        st.session_state['_last_period_type'] = period_type
+
+        if period_type == '仅本月':
+            report_months = [month]
+            period_label = f'{year}年{month}月'
+        elif period_type == '本年至本月':
+            report_months = list(range(1, month + 1))
+            period_label = f'{year}年1-{month}月'
+        else:  # 全年
+            report_months = list(range(1, 13))
+            period_label = f'{year}年度'
+
+        # BS date uses last day of month (always end-of-month snapshot)
+        import calendar
+        last_day = calendar.monthrange(year, month)[1]
+        bs_date = f'{year}年{month}月{last_day}日'
+
+        config = load_company_config(company)
+        company_full = config.get('full_name', company)
+
+        template_dir = get_template_dir(company)
+        output_dir = os.path.join(OUTPUT_DIR, company, f'{year}-{month:02d}')
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Only generate if not already done
+        if not st.session_state.generated_reports:
+            with st.spinner('正在生成报表...'):
+                # Filter invoice data to selected months
+                filtered_sales = {m: recs for m, recs in data['sales_data'].items()
+                                  if m in report_months}
+                filtered_costs = {m: recs for m, recs in data['costs_data'].items()
+                                  if m in report_months}
+
+                # Load multi-month bank/payroll data
+                period_bank, period_payroll = load_period_bank_payroll(
+                    company, year, report_months)
+                if not period_payroll:
+                    period_payroll = data.get('payroll_data', {})
+                if not period_bank:
+                    period_bank = data.get('bank_data', {})
+
+                num_months = len(report_months)
+                mf = 1.0 / max(num_months, 1)
+
+                # Recalculate with filtered data
+                calc = CalcEngine(data['opening_bs'])
+                invoice_data = {'sales': filtered_sales, 'costs': filtered_costs}
+                pl = calc.calculate_pl(invoice_data, period_payroll,
+                                       data['pl_mappings'], period_bank, num_months)
+
+                # Bank end balance: sum last-known balance across banks
+                bank_end = 0.0
+                for m in report_months:
+                    mb = period_bank.get(m, {})
+                    for bn in ['农行', '信用社']:
+                        bd = mb.get(bn)
+                        if isinstance(bd, dict):
+                            bank_end += bd.get('end_balance', 0)
+
+                bs = calc.calculate_bs(pl, bank_end, pl['_detail']['fa_add'], num_months)
+                cf = calc.calculate_cf(pl, bs, period_bank, invoice_data, period_payroll,
+                                       pl['_detail']['fa_add'], num_months)
+                detail = pl.get('_detail', {})
+
+                # === 利润表 ===
+                pl_tmpl_path = os.path.join(template_dir, 'pl_custom.xlsx')
+                if os.path.exists(pl_tmpl_path):
+                    pl_tmpl = parse_custom_template(pl_tmpl_path)
+                    pl_data = {
+                        '一、营业收入': {0: pl.get('revenue'), 1: (pl.get('revenue') or 0) * mf},
+                        '减：营业成本': {0: pl.get('cogs'), 1: (pl.get('cogs') or 0) * mf},
+                        '税金及附加': {0: pl.get('surcharges'), 1: (pl.get('surcharges') or 0) * mf},
+                        '销售费用': {0: pl.get('selling_exp'), 1: None},
+                        '管理费用': {0: pl.get('admin_exp'), 1: (pl.get('admin_exp') or 0) * mf},
+                        '财务费用': {0: pl.get('fin_exp'), 1: (pl.get('fin_exp') or 0) * mf},
+                        '其中：利息费用（收入以"-"号填列）': {0: -detail.get('interest_income', 0) if detail.get('interest_income') else None, 1: None},
+                        '二、营业利润（亏损以"-"号填列）': {0: pl.get('oper_profit'), 1: (pl.get('oper_profit') or 0) * mf},
+                        '三、利润总额（亏损总额以"-"号填列）': {0: pl.get('total_profit'), 1: (pl.get('total_profit') or 0) * mf},
+                        '四、净利润（净亏损以"-"号填列）': {0: pl.get('net_profit'), 1: (pl.get('net_profit') or 0) * mf},
+                    }
+                    pl_out = os.path.join(output_dir, f'利润表_{period_label}.xlsx')
+                    fill_custom_template(pl_tmpl_path, pl_tmpl['field_map'], pl_data, pl_out,
+                                         company_name=company_full, period_label=period_label)
+                    st.session_state.generated_reports['pl'] = pl_out
+
+                # === 资产负债表 ===
+                bs_tmpl_path = os.path.join(template_dir, 'bs_custom.xlsx')
+                if os.path.exists(bs_tmpl_path):
+                    bs_tmpl = parse_custom_template(bs_tmpl_path)
+                    bs_data = {
+                        '货币资金': {0: bs.get('cash'), 1: bs.get('cash')},
+                        '应收账款': {0: bs.get('ar'), 1: bs.get('ar')},
+                        '预付账款': {0: bs.get('prepay'), 1: bs.get('prepay')},
+                        '其他应收款': {0: bs.get('other_recv'), 1: bs.get('other_recv')},
+                        '存货': {0: bs.get('inventory'), 1: bs.get('inventory')},
+                        '流动资产合计': {0: bs.get('curr_assets'), 1: bs.get('curr_assets')},
+                        '固定资产原价': {0: bs.get('fa_orig'), 1: bs.get('fa_orig')},
+                        '减：累计折旧': {0: bs.get('acc_depr'), 1: bs.get('acc_depr')},
+                        '固定资产账面价值': {0: bs.get('fa_net'), 1: bs.get('fa_net')},
+                        '长期待摊费用': {0: bs.get('ltd'), 1: bs.get('ltd')},
+                        '非流动资产合计': {0: bs.get('non_curr_assets'), 1: bs.get('non_curr_assets')},
+                        '资产总计': {0: bs.get('total_assets'), 1: bs.get('total_assets')},
+                        '应付账款': {0: bs.get('ap'), 1: bs.get('ap')},
+                        '预收账款': {0: bs.get('pr'), 1: bs.get('pr')},
+                        '应付职工薪酬': {0: bs.get('payroll_payable'), 1: bs.get('payroll_payable')},
+                        '应交税费': {0: bs.get('tax_payable'), 1: bs.get('tax_payable')},
+                        '其他应付款': {0: bs.get('other_pay'), 1: bs.get('other_pay')},
+                        '流动负债合计': {0: bs.get('curr_liab'), 1: bs.get('curr_liab')},
+                        '负债合计': {0: bs.get('total_liab'), 1: bs.get('total_liab')},
+                        '实收资本（或股本）': {0: bs.get('capital'), 1: bs.get('capital')},
+                        '未分配利润': {0: bs.get('undist_profit_end'), 1: bs.get('undist_profit_end')},
+                        '所有者权益（或股东权益）合计': {0: bs.get('total_equity'), 1: bs.get('total_equity')},
+                        '负债和所有者权益（或股东权益）总计': {0: bs.get('total_le'), 1: bs.get('total_le')},
+                    }
+                    bs_out = os.path.join(output_dir, f'资产负债表_{bs_date}.xlsx')
+                    fill_custom_template(bs_tmpl_path, bs_tmpl['field_map'], bs_data, bs_out,
+                                         company_name=company_full, period_label=bs_date)
+                    st.session_state.generated_reports['bs'] = bs_out
+
+                # === 现金流量表 ===
+                cf_tmpl_path = os.path.join(template_dir, 'cf_custom.xlsx')
+                if os.path.exists(cf_tmpl_path):
+                    cf_tmpl = parse_custom_template(cf_tmpl_path)
+                    cf_data = {}
+                    for k, v in cf.items():
+                        if not k.startswith('_') and v is not None:
+                            cf_data[k] = {0: v, 1: v * mf if isinstance(v, (int, float)) else v}
+                    cf_out = os.path.join(output_dir, f'现金流量表_{period_label}.xlsx')
+                    fill_custom_template(cf_tmpl_path, cf_tmpl['field_map'], cf_data, cf_out,
+                                         company_name=company_full, period_label=period_label)
+                    st.session_state.generated_reports['cf'] = cf_out
+
+                # === 科目余额表 ===
+                tb_out = os.path.join(output_dir, f'科目余额表_{period_label}.xlsx')
+                generate_trial_balance(
+                    filtered_sales, filtered_costs,
+                    company_name=company_full, period_label=period_label,
+                    output_path=tb_out,
+                )
+                st.session_state.generated_reports['tb'] = tb_out
+
+        # Show download cards
+        st.subheader(f'📥 {period_label} 报表')
+
+        report_labels = {
+            'pl': ('📈 利润表', f'利润表_{period_label}.xlsx'),
+            'bs': ('📋 资产负债表', f'资产负债表_{bs_date}.xlsx'),
+            'cf': ('💵 现金流量表', f'现金流量表_{period_label}.xlsx'),
+            'tb': ('📊 科目余额表', f'科目余额表_{period_label}.xlsx'),
+        }
+
+        for key, (label, fname) in report_labels.items():
+            path = st.session_state.generated_reports.get(key)
+            if path and os.path.exists(path):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    size_kb = os.path.getsize(path) / 1024
+                    st.success(f'{label} — {size_kb:.1f} KB')
+                with col2:
+                    with open(path, 'rb') as f:
+                        st.download_button(
+                            '⬇ 下载',
+                            f.read(),
+                            file_name=fname,
+                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                            key=f'dl_{key}',
+                            use_container_width=True,
+                        )
 
         st.divider()
-        st.subheader('📝 分析报告')
-
-        col_r1, col_r2 = st.columns([1, 2])
-        with col_r1:
-            if st.session_state.last_pl and st.session_state.last_bs and st.session_state.last_cf:
-                if st.button('📄 生成分析报告（Word）', type='primary', use_container_width=True):
-                    company = st.session_state.current_company
-                    output_dir = os.path.join(OUTPUT_DIR, company)
-                    os.makedirs(output_dir, exist_ok=True)
-                    full_name = config.get('full_name', company)
-                    period_label = st.session_state.last_period_label
-                    bs_date = st.session_state.last_bs_date
-
-                    docx_path = os.path.join(
-                        output_dir, f'{company}_{period_label}_财务分析报告.docx')
-
-                    with st.spinner('正在生成分析报告...'):
-                        generate_analysis_report(
-                            full_name, period_label, bs_date,
-                            st.session_state.last_pl,
-                            st.session_state.last_bs,
-                            st.session_state.last_cf,
-                            st.session_state.last_opening_bs,
-                            docx_path)
-                    st.session_state.generated_docx_path = docx_path
-                    st.success('✅ 分析报告已生成！')
-
-                if st.session_state.generated_docx_path and \
-                   os.path.exists(st.session_state.generated_docx_path):
-                    with open(st.session_state.generated_docx_path, 'rb') as f:
-                        st.download_button(
-                            '📥 下载分析报告', f.read(),
-                            os.path.basename(st.session_state.generated_docx_path),
-                            mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                            use_container_width=True)
-            else:
-                st.button('📄 生成分析报告（需先生成报表）', disabled=True, use_container_width=True)
-                st.caption('请先在「报表生成」页面生成三大报表。')
-
-        if st.session_state.generated_pl_path:
-            st.info('✅ 报表已生成，可使用上方按钮下载。')
-
-    st.divider()
-    out_dir = os.path.join(OUTPUT_DIR, st.session_state.current_company) if st.session_state.current_company else OUTPUT_DIR
-    st.caption(f'报表保存位置：{out_dir}')
-
-# ================================================================
-# PAGE: 历史对比
-# ================================================================
-elif st.session_state.page == '历史对比':
-    st.header('📈 历史对比')
-
-    if not st.session_state.current_company:
-        st.info('请先选择公司')
-    else:
-        company = st.session_state.current_company
-        output_dir = os.path.join(OUTPUT_DIR, company)
-
-        # Scan for available summaries
-        summaries = {}
-        if os.path.exists(output_dir):
-            for fname in sorted(os.listdir(output_dir)):
-                if fname.startswith('summary_') and fname.endswith('.json'):
-                    path = os.path.join(output_dir, fname)
-                    try:
-                        with open(path, 'r', encoding='utf-8') as sf:
-                            s = json.load(sf)
-                        period = s.get('period', fname)
-                        summaries[period] = s
-                    except Exception:
-                        pass
-
-        if len(summaries) < 2:
-            st.info(f'需要至少生成2个月份的报表才能对比。当前: {len(summaries)} 个')
-            if summaries:
-                st.caption(f'可用月份: {", ".join(summaries.keys())}')
-        else:
-            periods = list(summaries.keys())
-            selected = st.multiselect(
-                '选择对比月份（可多选）', periods,
-                default=periods[-min(6, len(periods)):],
-                help='选择要对比的月份，按选择顺序排列'
-            )
-
-            if len(selected) < 2:
-                st.info('请至少选择2个月份')
-            else:
-                # ---- PL Comparison ----
-                st.subheader('📊 利润表对比')
-
-                pl_fields = [
-                    ('revenue', '营业收入'),
-                    ('cogs', '营业成本'),
-                    ('surcharges', '税金及附加'),
-                    ('selling_exp', '销售费用'),
-                    ('admin_exp', '管理费用'),
-                    ('fin_exp', '财务费用'),
-                    ('oper_profit', '营业利润'),
-                    ('total_profit', '利润总额'),
-                    ('net_profit', '净利润'),
-                ]
-
-                # Build comparison table
-                pl_header = ['项目'] + selected
-                n_cols = len(pl_header)
-                # Add change column for 2-period comparison
-                if len(selected) == 2:
-                    pl_header.append('变动额')
-                    pl_header.append('变动率')
-                    n_cols = len(pl_header)
-
-                pl_numeric = []
-                for fkey, fname in pl_fields:
-                    vals = []
-                    for s in selected:
-                        pl_data = summaries[s].get('pl', {})
-                        v = pl_data.get(fkey)
-                        vals.append(v)
-                    pl_numeric.append((fkey, fname, vals))
-
-                # Render PL table
-                pl_table = '| ' + ' | '.join(pl_header) + ' |\n'
-                pl_table += '|' + '|'.join(['---'] * n_cols) + '|\n'
-                for fkey, fname, vals in pl_numeric:
-                    formatted = []
-                    for v in vals:
-                        if v is None:
-                            formatted.append('—')
-                        else:
-                            formatted.append(f'{v:,.2f}')
-                    if len(selected) == 2 and vals[0] is not None and vals[1] is not None:
-                        change = vals[0] - vals[1]
-                        pct = (change / vals[1] * 100) if vals[1] != 0 else 0
-                        change_str = f'{change:+,.2f}'
-                        pct_str = f'{pct:+.1f}%'
-                        if abs(pct) > 30:
-                            change_str += ' ⚠'
-                        if abs(pct) > 50:
-                            change_str += ' 🔴'
-                        formatted.append(change_str)
-                        formatted.append(pct_str)
-                    pl_table += '| ' + ' | '.join([fname] + formatted) + ' |\n'
-
-                st.markdown(pl_table)
-
-                # ---- BS Comparison ----
-                st.subheader('📊 资产负债表对比')
-
-                bs_fields = [
-                    ('cash', '货币资金'),
-                    ('ar', '应收账款'),
-                    ('inventory', '存货'),
-                    ('curr_assets', '流动资产合计'),
-                    ('fa_net', '固定资产净值'),
-                    ('total_assets', '资产总计'),
-                    ('ap', '应付账款'),
-                    ('tax_payable', '应交税费'),
-                    ('other_pay', '其他应付款'),
-                    ('total_liab', '负债合计'),
-                    ('capital', '实收资本'),
-                    ('undist_profit_end', '未分配利润'),
-                    ('total_equity', '所有者权益合计'),
-                ]
-
-                bs_header = ['项目'] + selected
-                if len(selected) == 2:
-                    bs_header += ['变动额', '变动率']
-                n_bs = len(bs_header)
-
-                bs_table = '| ' + ' | '.join(bs_header) + ' |\n'
-                bs_table += '|' + '|'.join(['---'] * n_bs) + '|\n'
-                for fkey, fname in bs_fields:
-                    vals = []
-                    for s in selected:
-                        bs_data = summaries[s].get('bs', {})
-                        v = bs_data.get(fkey)
-                        vals.append(v)
-                    formatted = []
-                    for v in vals:
-                        if v is None:
-                            formatted.append('—')
-                        else:
-                            formatted.append(f'{v:,.2f}')
-                    if len(selected) == 2 and vals[0] is not None and vals[1] is not None:
-                        change = vals[0] - vals[1]
-                        pct = (change / abs(vals[1]) * 100) if vals[1] != 0 else 0
-                        fmt = f'{change:+,.2f}'
-                        if abs(pct) > 30:
-                            fmt += ' ⚠'
-                        formatted.append(fmt)
-                        formatted.append(f'{pct:+.1f}%')
-                    bs_table += '| ' + ' | '.join([fname] + formatted) + ' |\n'
-
-                st.markdown(bs_table)
-
-                # ---- Export to xlsx ----
-                st.divider()
-                if st.button('📥 导出对比表 (Excel)', use_container_width=True):
-                    import openpyxl as _xl
-                    from openpyxl.styles import Font as _Font, Alignment as _Align, Border as _B, Side as _S
-                    wb = _xl.Workbook()
-
-                    def _write_comparison_sheet(ws, title, fields, summaries_data, selected_periods):
-                        ws.title = title
-                        thin = _B(left=_S('thin'), right=_S('thin'), top=_S('thin'), bottom=_S('thin'))
-                        hdr_font = _Font(name='宋体', size=10, bold=True)
-                        num_font = _Font(name='Arial', size=10)
-                        # Headers
-                        headers = ['项目'] + selected_periods
-                        if len(selected_periods) == 2:
-                            headers += ['变动额', '变动率']
-                        for ci, h in enumerate(headers, 1):
-                            c = ws.cell(row=1, column=ci, value=h)
-                            c.font = hdr_font; c.border = thin; c.alignment = _Align(horizontal='center')
-                        # Data
-                        for ri, (fkey, fname) in enumerate(fields, 2):
-                            ws.cell(row=ri, column=1, value=fname).font = _Font(name='宋体', size=10)
-                            ws.cell(row=ri, column=1).border = thin
-                            vals = [summaries_data[s].get(title[:2].lower() if title.startswith('利润') else 'bs', {}).get(fkey) for s in selected_periods]
-                            for ci, v in enumerate(vals, 2):
-                                c = ws.cell(row=ri, column=ci, value=v)
-                                c.font = num_font; c.border = thin; c.number_format = '#,##0.00'
-                            if len(selected_periods) == 2 and vals[0] is not None and vals[1] is not None:
-                                chg = vals[0] - vals[1]
-                                ws.cell(row=ri, column=len(selected_periods)+2, value=chg).font = num_font
-                                ws.cell(row=ri, column=len(selected_periods)+2).number_format = '#,##0.00'
-                                ws.cell(row=ri, column=len(selected_periods)+2).border = thin
-                                pct = chg / abs(vals[1]) * 100 if vals[1] != 0 else 0
-                                ws.cell(row=ri, column=len(selected_periods)+3, value=pct/100).font = num_font
-                                ws.cell(row=ri, column=len(selected_periods)+3).number_format = '0.0%'
-                                ws.cell(row=ri, column=len(selected_periods)+3).border = thin
-                        # Col widths
-                        ws.column_dimensions[_xl.utils.get_column_letter(1)].width = 18
-                        for ci in range(2, len(headers)+2):
-                            ws.column_dimensions[_xl.utils.get_column_letter(ci)].width = 16
-
-                    _write_comparison_sheet(wb.active, '利润表对比', pl_fields, summaries, selected)
-                    ws2 = wb.create_sheet()
-                    _write_comparison_sheet(ws2, '资产负债表对比', bs_fields, summaries, selected)
-
-                    xlsx_path = os.path.join(output_dir, f'{company}_历史对比_{"_".join(selected)}.xlsx')
-                    wb.save(xlsx_path)
-                    with open(xlsx_path, 'rb') as f:
-                        st.download_button('⬇ 下载对比表', f.read(), os.path.basename(xlsx_path),
-                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                            use_container_width=True)
-
-                # Auto-highlight anomalies
-                if len(selected) == 2:
-                    st.divider()
-                    st.subheader('🔍 异常波动检测')
-                    anomalies = []
-                    for fkey, fname in pl_fields + bs_fields:
-                        src = 'pl' if fkey in dict(pl_fields) else 'bs'
-                        v1 = summaries[selected[0]].get(src, {}).get(fkey)
-                        v2 = summaries[selected[1]].get(src, {}).get(fkey)
-                        if v1 is not None and v2 is not None and v2 != 0:
-                            pct = (v1 - v2) / abs(v2) * 100
-                            if abs(pct) > 30:
-                                anomalies.append((fname, v1, v2, pct, src))
-                    if anomalies:
-                        for name, v1, v2, pct, src in anomalies:
-                            icon = '🔴' if abs(pct) > 50 else '⚠'
-                            direction = '增长' if pct > 0 else '下降'
-                            st.warning(
-                                f'{icon} **{name}**: {v2:,.2f} → {v1:,.2f}，{direction} {abs(pct):.1f}%'
-                            )
-                    else:
-                        st.success('✅ 未检测到超过30%的异常波动')
-
-                # Trend sparkline hint
-                if len(selected) >= 3:
-                    st.divider()
-                    st.subheader('📈 趋势简析')
-                    for fkey, fname in pl_fields[:3] + [pl_fields[-1]]:  # revenue, cogs, surcharges, net_profit
-                        vals = [summaries[s].get('pl', {}).get(fkey) for s in selected]
-                        vals_clean = [v for v in vals if v is not None]
-                        if len(vals_clean) >= 2:
-                            trend = '↑ 上升' if vals_clean[-1] > vals_clean[0] else '↓ 下降' if vals_clean[-1] < vals_clean[0] else '→ 持平'
-                            st.caption(f'{fname}: {trend}（{vals_clean[0]:,.0f} → {vals_clean[-1]:,.0f}）')
-
-# ================================================================
-# PAGE: 使用教程
-# ================================================================
-elif st.session_state.page == '使用教程':
-    st.header('📖 使用教程')
-    st.caption('一步一步教你从零到生成完整财务报表。预计首次设置约10分钟，之后每月约3分钟。')
-
-    TUTORIAL_DIR = os.path.join(BASE_DIR, 'tutorial')
-    has_images = os.path.isdir(TUTORIAL_DIR)
-
-    def _tut(path):
-        return os.path.join(TUTORIAL_DIR, path) if has_images and os.path.exists(os.path.join(TUTORIAL_DIR, path)) else None
-
-    # ---- Step 1 ----
-    with st.expander('🚀 启动工具 & 首页介绍', expanded=True):
-        pic = _tut('01-home.png')
-        if pic: st.image(pic, use_container_width=True)
-        st.markdown("""
-        **启动方式：** 双击 `启动报表工具.bat` 或在终端运行 `streamlit run app.py`
-        → 浏览器打开 **http://localhost:8501**
-
-        看图识别：**①** 导航栏切换功能 **②** 选择公司和年月 **③** 主工作区
-        """)
-
-    # ---- Step 2 ----
-    with st.expander('📝 第一步：创建公司'):
-        pic = _tut('02-company.png')
-        if pic: st.image(pic, use_container_width=True)
-        st.markdown("""
-        看图操作：**①** 填公司简称 **②** 填公司全称（用于报表抬头）**③** 点创建按钮
-        """)
-
-    # ---- Step 3 ----
-    with st.expander('📋 第二步：填写年初余额'):
-        pic = _tut('03-opening.png')
-        if pic: st.image(pic, use_container_width=True)
-        st.markdown("""
-        看图操作：**①** 直接上传去年12月资产负债表xlsx，系统自动识别填入（新功能！）
-        **②** 资产类科目 **③** 负债及权益类 **④** 保存
-        """)
-
-    # ---- Step 4 ----
-    with st.expander('🔗 第三步：配置科目映射'):
-        if has_images:
-            for i in ['04-mapping.png', '04b-mapping-pl.png']:
-                p = _tut(i)
-                if p: st.image(p, use_container_width=True)
-        st.markdown("""
-        告诉系统「发票上的科目编码对应报表里哪一行」。
-        上传一张历史发票 → 系统列出所有科目编码 → 下拉选择映射。
-        > 💡 只需首次配置一次，之后每月自动复用。
-        """)
-
-    # ---- Step 5 ----
-    with st.expander('📥 第四步：导入当月数据'):
-        pic = _tut('04-import.png')
-        if pic: st.image(pic, use_container_width=True)
-        st.markdown("""
-        看图操作：**①** 一键批量导入（多选所有文件，系统自动识别归类）
-        **②** 也可逐个手动上传 **③** 保存并核验
-        """)
-
-    # ---- Step 6 ----
-    with st.expander('🔍 第五步：数据核验'):
-        pic = _tut('05-verify.png')
-        if pic: st.image(pic, use_container_width=True)
-        st.markdown("""
-        看图操作：**①** 检查数据摘要（发票张数、收入/成本/银行/工资总额）
-        **②** 确认无误 → 进入报表生成
-        """)
-
-    # ---- Step 7 ----
-    with st.expander('📊 第六步：生成三大报表'):
-        pic = _tut('06-generate.png')
-        if pic: st.image(pic, use_container_width=True)
-        st.markdown("""
-        看图操作：**①** 多月份可按需批量生成 **②** 点击生成三大报表
-        系统自动：利润表 → 资产负债表 → 现金流量表 → 格式渲染 → 保存
-        """)
-
-    # ---- Step 8 ----
-    with st.expander('📝 第七步：分析导出 & 历史对比'):
-        pic1 = _tut('07-export.png'); pic2 = _tut('08-history.png')
-        if pic1: st.image(pic1, use_container_width=True)
-        st.markdown("**①** 下载三大报表 **②** 生成Word分析报告")
-        if pic2: st.image(pic2, use_container_width=True)
-        st.markdown("**①** 多选对比月份 **②** 横排对比表，自动标注异常波动（>30%⚠/ >50%🔴）")
-
-    # ---- Summary ----
-    st.divider()
-    st.subheader('🔄 每月使用流程（3分钟）')
-    st.code("""
-月初 → 数据导入(传5个文件) → 数据核验(确认数字) → 报表生成(一键) → 分析导出(下载)
-    """, language=None)
-    st.caption('💡 首次设置后，每月只需重复第四步到第七步。')
-
-    st.subheader('❓ 常见问题')
-    st.markdown("""
-| 提示 | 怎么办 |
-|------|--------|
-| 🔴 "发现新的科目编码" | 去「科目映射」页给它分类 |
-| 🔴 "资产负债表不平" | 检查年初余额是否正确填写 |
-| ⚠ "发票数比上月少很多" | 确认是否漏传了文件 |
-| ⚠ "银行流水格式不匹配" | 确认文件是农行/信用社标准格式 |
-    """)
-
-    st.info('🔒 所有数据处理在本地完成，不上传任何服务器。数据存储位置：`data/` 目录。')
-
-# ---- Footer ----
-st.divider()
-st.caption(f'数据存储位置：{DATA_DIR}  |  所有数据处理在本地完成，不上传任何服务器')
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            if st.button('→ 生成下个月', type='primary', use_container_width=True):
+                next_month = st.session_state.current_month + 1
+                if next_month > 12:
+                    st.session_state.current_month = 1
+                    st.session_state.current_year += 1
+                else:
+                    st.session_state.current_month = next_month
+                st.session_state.extracted_data = None
+                st.session_state.generated_reports = {}
+                st.session_state.uploaded_files = {}
+                st.session_state.classified_files = []
+                st.session_state.unknown_files = []
+                st.session_state.page = 'upload'
+                st.rerun()

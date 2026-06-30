@@ -1,0 +1,231 @@
+{
+  "company": "顺恒废旧公司",
+  "statement_type": "bs",
+  "template_file": "资产负债表_custom.xlsx",
+  "field_map": {
+    "无形资产": {
+      "row": 31,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "无形资产",
+      "score": 1.0
+    },
+    "流动资产：": {
+      "row": 5,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "流动资产：",
+      "score": 1.0
+    },
+    "货币资金": {
+      "row": 6,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "货币资金",
+      "score": 1.0
+    },
+    "短期投资": {
+      "row": 7,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "短期投资",
+      "score": 1.0
+    },
+    "应收票据": {
+      "row": 8,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "应收票据",
+      "score": 1.0
+    },
+    "应收账款": {
+      "row": 9,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "应收账款",
+      "score": 1.0
+    },
+    "预付账款": {
+      "row": 10,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "预付账款",
+      "score": 1.0
+    },
+    "应收股利": {
+      "row": 11,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "应收股利",
+      "score": 1.0
+    },
+    "应收利息": {
+      "row": 12,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "应收利息",
+      "score": 1.0
+    },
+    "其他应收款": {
+      "row": 13,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "其他应收款",
+      "score": 1.0
+    },
+    "存货": {
+      "row": 14,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "存货",
+      "score": 1.0
+    },
+    "  其中：原材料": {
+      "row": 15,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "其中：原材料",
+      "score": 1.0
+    },
+    "       在产品": {
+      "row": 16,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "在产品",
+      "score": 1.0
+    },
+    "       库存商品": {
+      "row": 17,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "库存商品",
+      "score": 1.0
+    },
+    "       周转材料": {
+      "row": 18,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "周转材料",
+      "score": 1.0
+    },
+    "其他流动资产": {
+      "row": 19,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "其他流动资产",
+      "score": 1.0
+    },
+    "流动资产合计": {
+      "row": 20,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "流动资产合计",
+      "score": 1.0
+    },
+    "非流动资产：": {
+      "row": 21,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "非流动资产：",
+      "score": 1.0
+    },
+    "长期债券投资": {
+      "row": 22,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "长期债券投资",
+      "score": 1.0
+    },
+    "长期股权投资": {
+      "row": 23,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "长期股权投资",
+      "score": 1.0
+    },
+    "固定资产原价": {
+      "row": 24,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "固定资产原价",
+      "score": 1.0
+    },
+    "减：累计折旧": {
+      "row": 25,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "减：累计折旧",
+      "score": 1.0
+    },
+    "固定资产账面价值": {
+      "row": 26,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "固定资产账面价值",
+      "score": 1.0
+    },
+    "在建工程": {
+      "row": 27,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "在建工程",
+      "score": 1.0
+    },
+    "工程物资": {
+      "row": 28,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "工程物资",
+      "score": 1.0
+    },
+    "固定资产清理": {
+      "row": 29,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "固定资产清理",
+      "score": 1.0
+    },
+    "生产性生物资产": {
+      "row": 30,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "生产性生物资产",
+      "score": 1.0
+    },
+    "开发支出": {
+      "row": 32,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "开发支出",
+      "score": 1.0
+    },
+    "长期待摊费用": {
+      "row": 33,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "长期待摊费用",
+      "score": 1.0
+    },
+    "其他非流动资产": {
+      "row": 34,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "其他非流动资产",
+      "score": 1.0
+    },
+    "非流动资产合计": {
+      "row": 35,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "非流动资产合计",
+      "score": 1.0
+    },
+    "资产总计": {
+      "row": 36,
+      "col_cum": 3,
+      "col_mon": 4,
+      "label": "资产总计",
+      "score": 1.0
+    }
+  }
+}
