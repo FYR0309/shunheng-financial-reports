@@ -16,6 +16,24 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
+# ---- 隐藏英文原生 UI 文本（Streamlit 无官方中文支持，通过 CSS 屏蔽英文提示） ----
+st.markdown("""
+<style>
+/* 隐藏 file_uploader 的英文拖拽提示 */
+[data-testid="stFileUploaderDropzone"] > div > div:first-child {
+    display: none !important;
+}
+/* 隐藏文件大小限制提示 "Limit XMB per file" */
+[data-testid="stFileUploaderDropzone"] > div > small {
+    display: none !important;
+}
+/* 上传区域最小高度（隐藏英文后保持视觉紧凑） */
+[data-testid="stFileUploaderDropzone"] {
+    min-height: 60px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ---- Paths ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -48,6 +66,19 @@ for key, val in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
+# ---- 初始化默认公司配置 ----
+def _ensure_company_config(company_name):
+    """确保公司目录和 config.json 存在，不存在则自动创建。"""
+    company_dir = get_company_dir(company_name)
+    os.makedirs(company_dir, exist_ok=True)
+    config_path = os.path.join(company_dir, 'config.json')
+    if not os.path.exists(config_path):
+        default_config = {
+            'full_name': company_name,
+            'opening_bs': {}
+        }
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(default_config, f, ensure_ascii=False, indent=2)
 
 # ---- Helpers ----
 def get_company_dir(name):
@@ -59,6 +90,9 @@ def load_company_config(name):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
+
+# 初始化默认公司
+_ensure_company_config(DEFAULT_COMPANY)
 
 def get_upload_dir(company, year, month):
     return os.path.join(UPLOADS_DIR, company, f'{year}-{month:02d}')
@@ -113,10 +147,58 @@ def load_period_bank_payroll(company, year, months):
 with st.sidebar:
     st.title('📊 财务报表工具')
 
-    # Company (fixed display, no switching needed for V3)
+    # ---- 公司选择 ----
+    # 扫描已有公司
+    existing_companies = set()
+    if os.path.exists(COMPANIES_DIR):
+        for d in os.listdir(COMPANIES_DIR):
+            if os.path.isdir(os.path.join(COMPANIES_DIR, d)):
+                existing_companies.add(d)
+    if os.path.exists(TEMPLATES_DIR):
+        for d in os.listdir(TEMPLATES_DIR):
+            if os.path.isdir(os.path.join(TEMPLATES_DIR, d)):
+                existing_companies.add(d)
+    if DEFAULT_COMPANY not in existing_companies:
+        existing_companies.add(DEFAULT_COMPANY)
+    company_list = sorted(existing_companies)
+
+    current_company = st.session_state.current_company
+    if current_company not in company_list:
+        current_company = company_list[0]
+
+    try:
+        idx = company_list.index(current_company)
+    except ValueError:
+        idx = 0
+
+    new_company = st.selectbox(
+        '🏢 选择公司',
+        company_list,
+        index=idx,
+        label_visibility='visible',
+    )
+
+    if new_company != st.session_state.current_company:
+        st.session_state.current_company = new_company
+        _ensure_company_config(new_company)
+        # 清空缓存，回到上传页
+        st.session_state.extracted_data = None
+        st.session_state.generated_reports = {}
+        st.session_state.uploaded_files = {}
+        st.session_state.classified_files = []
+        st.session_state.unknown_files = []
+        st.session_state.page = 'upload'
+        st.rerun()
+
     company = st.session_state.current_company
     config = load_company_config(company)
-    st.caption(f'公司：{config.get("full_name", company)}')
+    if config.get('full_name') and config['full_name'] != company:
+        st.caption(f'全称：{config["full_name"]}')
+
+    # 模板检查
+    template_dir = get_template_dir(company)
+    if not os.path.exists(template_dir) or len([f for f in os.listdir(template_dir) if f.endswith('.xlsx')]) < 3:
+        st.warning('⚠️ 该公司模板不完整，请确保 data/templates/ 下有 pl/bs/cf 三个模板文件')
 
     # Year / Month
     c1, c2 = st.columns(2)
@@ -184,45 +266,48 @@ if st.session_state.page == 'upload':
     st.subheader(f'📤 {period_label} 数据文件')
 
     # Batch upload
-    st.markdown('**把本月所有文件一起拖入（可 Ctrl+多选），系统自动识别类型。**')
     uploaded = st.file_uploader(
-        '拖拽或点击选择文件',
+        '📂 点击选择文件，或拖拽文件到此处（支持多选）',
         type=['xlsx', 'xls'],
         accept_multiple_files=True,
         key='batch_upload',
-        label_visibility='collapsed',
+        label_visibility='visible',
     )
 
     if uploaded:
-        # Save and classify each file
+        # Save and classify each file (with per-file error isolation)
         os.makedirs(upload_dir, exist_ok=True)
         classified = []
         unknown = []
+        errors = []
 
         for f in uploaded:
-            # Save
-            filepath = os.path.join(upload_dir, f.name)
-            with open(filepath, 'wb') as out:
-                out.write(f.getbuffer())
+            try:
+                # Save
+                filepath = os.path.join(upload_dir, f.name)
+                with open(filepath, 'wb') as out:
+                    out.write(f.getbuffer())
 
-            # Classify
-            ftype = classify_file(filepath)
-            # Fallback: filename-based detection
-            if ftype == 'unknown':
-                fn_lower = f.name.lower()
-                if '销售' in f.name or 'sales' in fn_lower or '收入' in f.name:
-                    ftype = 'sales_invoice'
-                elif '成本' in f.name or 'cost' in fn_lower or '费用' in f.name or '采购' in f.name:
-                    ftype = 'cost_invoice'
-                elif '农行' in f.name or 'nong' in fn_lower:
-                    ftype = 'bank_nong'
-                elif '信用' in f.name or 'xin' in fn_lower:
-                    ftype = 'bank_xin'
-                elif '工资' in f.name or 'payroll' in fn_lower or '薪金' in f.name:
-                    ftype = 'payroll'
-            classified.append((f.name, ftype))
-            if ftype == 'unknown':
-                unknown.append(f.name)
+                # Classify
+                ftype = classify_file(filepath)
+                # Fallback: filename-based detection
+                if ftype == 'unknown':
+                    fn_lower = f.name.lower()
+                    if '销售' in f.name or 'sales' in fn_lower or '收入' in f.name:
+                        ftype = 'sales_invoice'
+                    elif '成本' in f.name or 'cost' in fn_lower or '费用' in f.name or '采购' in f.name:
+                        ftype = 'cost_invoice'
+                    elif '农行' in f.name or 'nong' in fn_lower:
+                        ftype = 'bank_nong'
+                    elif '信用' in f.name or 'xin' in fn_lower:
+                        ftype = 'bank_xin'
+                    elif '工资' in f.name or 'payroll' in fn_lower or '薪金' in f.name:
+                        ftype = 'payroll'
+                classified.append((f.name, ftype))
+                if ftype == 'unknown':
+                    unknown.append(f.name)
+            except Exception as e:
+                errors.append((f.name, str(e)))
 
         st.session_state.classified_files = classified
         st.session_state.unknown_files = unknown
@@ -230,6 +315,11 @@ if st.session_state.page == 'upload':
         # Show results
         st.divider()
         st.subheader('识别结果')
+
+        if errors:
+            st.error(f'❌ {len(errors)} 个文件处理失败：')
+            for fname, msg in errors:
+                st.error(f'  • {fname} — {msg}')
 
         type_labels = {
             'sales_invoice': '📈 销售发票',
@@ -241,19 +331,20 @@ if st.session_state.page == 'upload':
             'unknown': '⚠️ 未识别',
         }
 
-        for fname, ftype in classified:
-            label = type_labels.get(ftype, f'❓ {ftype}')
-            if ftype == 'unknown':
-                st.error(f'{label} — {fname}')
-            elif ftype == 'balance_sheet':
-                st.info(f'{label} — {fname}')
-            else:
-                st.success(f'{label} — {fname}')
+        if classified:
+            for fname, ftype in classified:
+                label = type_labels.get(ftype, f'❓ {ftype}')
+                if ftype == 'unknown':
+                    st.warning(f'{label} — {fname}')
+                elif ftype == 'balance_sheet':
+                    st.info(f'{label} — {fname}')
+                else:
+                    st.success(f'{label} — {fname}')
 
         if unknown:
-            st.warning(f'⚠️ {len(unknown)} 个文件未能识别，请检查文件格式。')
+            st.warning(f'⚠️ {len(unknown)} 个文件未能识别类型，请检查文件名是否含有关键词（如"销售""成本""农行"等）。')
 
-        if not unknown:
+        if not unknown and not errors:
             st.success('✅ 所有文件已识别，可以进入下一步了！')
 
     # Show existing files if any
